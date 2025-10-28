@@ -14,11 +14,11 @@ class ESPCNConfig:
     kernel_size: int = 11
     activation: str = 'leaky_relu'  # 'relu', 'leaky_relu'
     use_batch_norm: bool = True
-    dropout_rate: float = 0.01
+    dropout_rate: float = 0.005
     
     # 훈련 설정
-    num_epochs: int = 1
-    batch_size: int = 2 
+    num_epochs: int = 2
+    batch_size: int = 2
     learning_rate: float = 1e-3
     weight_decay: float = 1e-5
     train_split: float = 0.8

@@ -10,8 +10,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import torch.nn.functional as F
-from torch.cuda.amp import GradScaler
-from torch.amp import autocast
+from torch.amp import GradScaler, autocast
 from PIL import Image
 import numpy as np
 from tqdm import tqdm
@@ -133,7 +132,7 @@ def train_model():
     use_amp = config.use_amp and device.type == 'cuda'
     if use_amp:
         print("Using Automatic Mixed Precision (FP16) training")
-        scaler = GradScaler()
+        scaler = GradScaler('cuda')
     else:
         print("Using FP32 training")
         scaler = None
