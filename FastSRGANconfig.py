@@ -19,7 +19,7 @@ class FastSRGANConfig:
     disc_num_layers: int = 5
     
     # 훈련 설정
-    num_epochs: int = 100
+    num_epochs: int = 3
     batch_size: int = 1
     learning_rate_gen: float = 1e-4
     learning_rate_disc: float = 1e-4
@@ -62,9 +62,9 @@ class FastSRGANConfig:
     device: str = 'auto'  # 'auto', 'cuda', 'cpu'
     
     # 검증 및 저장 설정
-    save_interval: int = 10  # 몇 epoch마다 모델 저장
-    validate_interval: int = 5  # 몇 epoch마다 검증
-    sample_interval: int = 10  # 몇 epoch마다 샘플 이미지 저장
+    save_interval: int = 1  # 몇 epoch마다 모델 저장
+    validate_interval: int = 1  # 몇 epoch마다 검증
+    sample_interval: int = 1  # 몇 epoch마다 샘플 이미지 저장
     
     def __post_init__(self):
         """설정 후처리"""
