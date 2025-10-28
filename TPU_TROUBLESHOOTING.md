@@ -72,7 +72,7 @@ RuntimeError: No TPU devices found
 gcloud compute tpus list
 
 # TPU 디바이스 확인
-python -c "import torch_xla; import torch_xla.core.xla_model as xm; print(xm.xla_device())"
+python -c "import torch_xla; print(torch_xla.device())"
 ```
 
 ---
@@ -161,19 +161,20 @@ python -W ignore::SyntaxWarning 03_train_FastSRGAN.py
 
 ### TPU 상태 확인
 ```python
+import torch_xla
 import torch_xla.core.xla_model as xm
 
-# 현재 디바이스
-print(f"Device: {xm.xla_device()}")
+# 현재 디바이스 (최신 API)
+device = torch_xla.device()
+print(f"Device: {device}")
 
-# 사용 가능한 디바이스 수
-print(f"Number of devices: {xm.xrt_world_size()}")
+# 디바이스 개수
+import torch_xla.runtime as xr
+print(f"Number of devices: {xr.world_size()}")
 
 # 현재 디바이스 순서
-print(f"Ordinal: {xm.get_ordinal()}")
-
-# Master 디바이스 확인
-print(f"Is master: {xm.is_master_ordinal()}")
+print(f"Global ordinal: {xr.global_ordinal()}")
+```
 ```
 
 ### 메모리 사용량 확인

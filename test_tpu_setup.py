@@ -30,7 +30,8 @@ def test_torch_xla():
 def test_tpu_device(xm):
     """TPU 디바이스 접근 확인"""
     try:
-        device = xm.xla_device()
+        import torch_xla
+        device = torch_xla.device()
         print(f"✓ TPU device available: {device}")
         return True, device
     except Exception as e:

@@ -185,10 +185,10 @@ def train_fast_srgan():
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             use_tpu = False
         else:
-            device = xm.xla_device()
+            import torch_xla
+            device = torch_xla.device()
             use_tpu = True
             print(f"Using TPU device: {device}")
-            print(f"Number of TPU devices: {xm.xrt_world_size()}")
     else:
         device = torch.device(config.device)
         use_tpu = False
@@ -420,16 +420,15 @@ def train_fast_srgan():
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
                 
-                # TPU에서는 master device에서만 저장
+                # 모델 저장 (TPU는 단일 프로세스 모드)
                 if use_tpu:
-                    if xm.is_master_ordinal():
-                        xm.save(generator.state_dict(), config.model_path_gen)
-                        xm.save(discriminator.state_dict(), config.model_path_disc)
-                        print(f"Best models saved! Val loss: {best_val_loss:.6f}")
+                    xm.save(generator.state_dict(), config.model_path_gen)
+                    xm.save(discriminator.state_dict(), config.model_path_disc)
                 else:
                     torch.save(generator.state_dict(), config.model_path_gen)
                     torch.save(discriminator.state_dict(), config.model_path_disc)
-                    print(f"Best models saved! Val loss: {best_val_loss:.6f}")
+                
+                print(f"Best models saved! Val loss: {best_val_loss:.6f}")
         
         # 에포크 정보 출력
         avg_gen_loss = gen_loss_total / len(train_loader)
@@ -446,9 +445,8 @@ def train_fast_srgan():
         # 주기적 모델 저장
         if epoch % config.save_interval == 0:
             if use_tpu:
-                if xm.is_master_ordinal():
-                    xm.save(generator.state_dict(), f'fast_srgan_generator_epoch_{epoch}.pth')
-                    xm.save(discriminator.state_dict(), f'fast_srgan_discriminator_epoch_{epoch}.pth')
+                xm.save(generator.state_dict(), f'fast_srgan_generator_epoch_{epoch}.pth')
+                xm.save(discriminator.state_dict(), f'fast_srgan_discriminator_epoch_{epoch}.pth')
             else:
                 torch.save(generator.state_dict(), f'fast_srgan_generator_epoch_{epoch}.pth')
                 torch.save(discriminator.state_dict(), f'fast_srgan_discriminator_epoch_{epoch}.pth')

@@ -33,7 +33,8 @@ def load_fast_srgan_model():
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             use_tpu = False
         else:
-            device = xm.xla_device()
+            import torch_xla
+            device = torch_xla.device()
             use_tpu = True
             print(f"Using TPU device: {device}")
     else:

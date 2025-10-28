@@ -74,7 +74,7 @@ os.environ['TPU_VISIBLE_DEVICES'] = '0,1,2,3'
 ### 단일 프로세스 모드
 - 하나의 Python 프로세스가 실행됨
 - TPU의 모든 코어가 자동으로 활용됨
-- `xm.xla_device()`가 모든 코어를 관리
+- `torch_xla.device()`가 모든 코어를 관리
 - 멀티프로세싱 오버헤드 없음
 
 ## 지금 바로 실행 가능

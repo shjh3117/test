@@ -93,8 +93,8 @@ pip install torch_xla -f https://storage.googleapis.com/libtpu-releases/index.ht
 ### TPU 인식 안됨
 ```python
 # Python에서 확인
-import torch_xla.core.xla_model as xm
-device = xm.xla_device()
+import torch_xla
+device = torch_xla.device()
 print(device)  # xla:0이 출력되어야 함
 ```
 
