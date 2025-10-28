@@ -150,13 +150,17 @@ class FastSRGANGenerator(nn.Module):
             nn.BatchNorm2d(num_features)
         )
         
-        # Upsampling layers
-        upsampling_layers = []
-        for _ in range(int(torch.log2(torch.tensor(upscale_factor)).item())):
-            upsampling_layers.append(
-                PixelShuffleUpsampling(num_features, num_features, 2)
-            )
-        self.upsampling = nn.Sequential(*upsampling_layers)
+        # Upsampling layers (업스케일링이 필요한 경우만)
+        if upscale_factor > 1:
+            upsampling_layers = []
+            for _ in range(int(torch.log2(torch.tensor(upscale_factor)).item())):
+                upsampling_layers.append(
+                    PixelShuffleUpsampling(num_features, num_features, 2)
+                )
+            self.upsampling = nn.Sequential(*upsampling_layers)
+        else:
+            # 1:1 복원인 경우 업샘플링 없음
+            self.upsampling = nn.Identity()
         
         # 마지막 레이어
         self.conv3 = nn.Sequential(

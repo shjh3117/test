@@ -26,7 +26,11 @@ class PerceptualLoss(nn.Module):
         super(PerceptualLoss, self).__init__()
         
         # VGG19의 특성 추출 레이어 사용
-        vgg19 = models.vgg19(pretrained=True).features
+        try:
+            vgg19 = models.vgg19(weights='VGG19_Weights.IMAGENET1K_V1').features
+        except:
+            # 이전 방식으로 폴백
+            vgg19 = models.vgg19(pretrained=True).features
         
         # VGG19의 conv3_4 레이어까지만 사용 (경량화)
         self.feature_extractor = nn.Sequential(*list(vgg19.children())[:16])
@@ -131,6 +135,15 @@ class FastSRGANDataset(Dataset):
         # 이미지 로드
         input_img = Image.open(input_path).convert('L')
         target_img = Image.open(target_path).convert('L')
+        
+        # 크기 확인 및 조정
+        input_size = input_img.size
+        target_size = target_img.size
+        
+        if input_size != target_size:
+            # 타겟 크기에 맞춰 입력 이미지 리사이즈
+            input_img = input_img.resize(target_size, Image.LANCZOS)
+            print(f"Resized input from {input_size} to {target_size}")
         
         # PIL to Tensor
         input_tensor = transforms.ToTensor()(input_img)
