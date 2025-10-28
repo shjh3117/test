@@ -1,6 +1,7 @@
 """
 Fast-SRGAN (MobileSRGAN) 모델 훈련
 기존 ESPCN 데이터셋 구조를 활용한 GAN 훈련
+TPU v5 지원 추가
 """
 
 import os
@@ -16,6 +17,18 @@ import numpy as np
 from tqdm import tqdm
 import torchvision.transforms as transforms
 import torchvision.models as models
+
+# TPU 지원
+try:
+    import torch_xla.core.xla_model as xm
+    import torch_xla.distributed.parallel_loader as pl
+    import torch_xla.distributed.xla_multiprocessing as xmp
+    TPU_AVAILABLE = True
+except ImportError:
+    TPU_AVAILABLE = False
+    xm = None
+    pl = None
+    xmp = None
 
 from FastSRGANconfig import fast_srgan_config as config
 from FastSRGAN_models import FastSRGANGenerator, FastSRGANDiscriminator
@@ -170,11 +183,23 @@ class FastSRGANDataset(Dataset):
 def train_fast_srgan():
     """Fast-SRGAN 훈련 함수"""
     # 디바이스 설정
-    device = torch.device(config.device)
+    if config.device == 'tpu':
+        if not TPU_AVAILABLE:
+            print("TPU requested but torch_xla not available. Falling back to CUDA/CPU.")
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            use_tpu = False
+        else:
+            device = xm.xla_device()
+            use_tpu = True
+            print(f"Using TPU device: {device}")
+    else:
+        device = torch.device(config.device)
+        use_tpu = False
+    
     print(f"Using device: {device}")
     
-    # FP16 설정
-    use_amp = config.use_amp and device.type == 'cuda'
+    # FP16 설정 (CUDA에서만)
+    use_amp = config.use_amp and (device.type == 'cuda' if not use_tpu else False)
     if use_amp:
         print("Using Automatic Mixed Precision (FP16) training")
         scaler_gen = GradScaler('cuda')
@@ -199,26 +224,34 @@ def train_fast_srgan():
         train_dataset, 
         batch_size=config.batch_size, 
         shuffle=True, 
-        num_workers=config.num_workers,
-        pin_memory=True
+        num_workers=config.num_workers if not use_tpu else 0,  # TPU는 num_workers=0 권장
+        pin_memory=True if not use_tpu else False
     )
     val_loader = DataLoader(
         val_dataset, 
         batch_size=config.batch_size, 
         shuffle=False, 
-        num_workers=config.num_workers,
-        pin_memory=True
+        num_workers=config.num_workers if not use_tpu else 0,
+        pin_memory=True if not use_tpu else False
     )
+    
+    # TPU용 데이터 로더 래핑
+    if use_tpu:
+        train_loader = pl.MpDeviceLoader(train_loader, device)
+        val_loader = pl.MpDeviceLoader(val_loader, device)
     
     # 모델 생성
     generator = FastSRGANGenerator().to(device)
     discriminator = FastSRGANDiscriminator().to(device)
     
-    # T4 GPU 최적화
+    # 디바이스별 최적화
     if device.type == 'cuda':
         torch.backends.cudnn.benchmark = True
         torch.backends.cudnn.allow_tf32 = True
         torch.backends.cuda.matmul.allow_tf32 = True
+    elif use_tpu:
+        # TPU 최적화는 자동으로 처리됨
+        print("TPU optimizations enabled")
     
     # 손실함수
     criterion = CombinedLoss().to(device)
@@ -292,7 +325,12 @@ def train_fast_srgan():
                     gen_loss = criterion(fake_img, target_img, is_discriminator=False)
                 
                 gen_loss.backward()
-                optimizer_gen.step()
+                
+                # TPU에서는 xm.optimizer_step 사용
+                if use_tpu:
+                    xm.optimizer_step(optimizer_gen)
+                else:
+                    optimizer_gen.step()
             
             gen_loss_total += gen_loss.item()
             
@@ -336,9 +374,18 @@ def train_fast_srgan():
                     
                     disc_loss = (disc_loss_real + disc_loss_fake) / 2
                     disc_loss.backward()
-                    optimizer_disc.step()
+                    
+                    # TPU에서는 xm.optimizer_step 사용
+                    if use_tpu:
+                        xm.optimizer_step(optimizer_disc)
+                    else:
+                        optimizer_disc.step()
                 
                 disc_loss_total += disc_loss.item()
+            
+            # TPU에서 주기적으로 마크 스텝 (그래디언트 동기화)
+            if use_tpu and batch_idx % 10 == 0:
+                xm.mark_step()
             
             # Progress bar 업데이트
             progress_bar.set_postfix({
@@ -367,23 +414,30 @@ def train_fast_srgan():
             
             avg_val_loss = val_loss / len(val_loader)
             
+            # TPU에서 동기화 필요
+            if use_tpu:
+                xm.mark_step()
+            
             # 최고 모델 저장
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
-                torch.save(generator.state_dict(), config.model_path_gen)
-                torch.save(discriminator.state_dict(), config.model_path_disc)
-                print(f"Best models saved! Val loss: {best_val_loss:.6f}")
+                
+                # TPU에서는 master device에서만 저장
+                if use_tpu:
+                    if xm.is_master_ordinal():
+                        xm.save(generator.state_dict(), config.model_path_gen)
+                        xm.save(discriminator.state_dict(), config.model_path_disc)
+                        print(f"Best models saved! Val loss: {best_val_loss:.6f}")
+                else:
+                    torch.save(generator.state_dict(), config.model_path_gen)
+                    torch.save(discriminator.state_dict(), config.model_path_disc)
+                    print(f"Best models saved! Val loss: {best_val_loss:.6f}")
         
         # 에포크 정보 출력
         avg_gen_loss = gen_loss_total / len(train_loader)
         avg_disc_loss = disc_loss_total / max(len(train_loader) // config.discriminator_update_freq, 1)
         
-        if device.type == 'cuda':
-            gpu_memory = torch.cuda.memory_allocated(device) / 1024**3
-            print(f"Epoch {epoch+1}: Gen={avg_gen_loss:.6f}, Disc={avg_disc_loss:.6f}, "
-                  f"GPU Mem: {gpu_memory:.2f}GB")
-        else:
-            print(f"Epoch {epoch+1}: Gen={avg_gen_loss:.6f}, Disc={avg_disc_loss:.6f}")
+        print(f"Epoch {epoch+1}: Gen={avg_gen_loss:.6f}, Disc={avg_disc_loss:.6f}")
         
         # 스케줄러 업데이트
         if scheduler_gen:
@@ -393,10 +447,24 @@ def train_fast_srgan():
         
         # 주기적 모델 저장
         if epoch % config.save_interval == 0:
-            torch.save(generator.state_dict(), f'fast_srgan_generator_epoch_{epoch}.pth')
-            torch.save(discriminator.state_dict(), f'fast_srgan_discriminator_epoch_{epoch}.pth')
+            if use_tpu:
+                if xm.is_master_ordinal():
+                    xm.save(generator.state_dict(), f'fast_srgan_generator_epoch_{epoch}.pth')
+                    xm.save(discriminator.state_dict(), f'fast_srgan_discriminator_epoch_{epoch}.pth')
+            else:
+                torch.save(generator.state_dict(), f'fast_srgan_generator_epoch_{epoch}.pth')
+                torch.save(discriminator.state_dict(), f'fast_srgan_discriminator_epoch_{epoch}.pth')
     
     print("Fast-SRGAN training completed!")
 
-if __name__ == "__main__":
+def _mp_fn(index):
+    """TPU 멀티프로세싱 래퍼"""
     train_fast_srgan()
+
+if __name__ == "__main__":
+    if config.device == 'tpu' and TPU_AVAILABLE:
+        # TPU 멀티프로세싱 실행
+        xmp.spawn(_mp_fn, args=(), nprocs=config.tpu_cores)
+    else:
+        # 일반 실행
+        train_fast_srgan()

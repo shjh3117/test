@@ -59,7 +59,8 @@ class FastSRGANConfig:
     benchmark_resolution: tuple = (720, 1280)
     
     # 시스템 설정
-    device: str = 'auto'  # 'auto', 'cuda', 'cpu'
+    device: str = 'auto'  # 'auto', 'cuda', 'cpu', 'tpu'
+    tpu_cores: int = 8  # TPU 코어 수 (v5 기준)
     
     # 검증 및 저장 설정
     save_interval: int = 1  # 몇 epoch마다 모델 저장
@@ -70,7 +71,12 @@ class FastSRGANConfig:
         """설정 후처리"""
         if self.device == 'auto':
             import torch
-            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+            # TPU 체크 먼저
+            try:
+                import torch_xla.core.xla_model as xm
+                self.device = 'tpu'
+            except ImportError:
+                self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 # 기본 설정 인스턴스
 fast_srgan_config = FastSRGANConfig()

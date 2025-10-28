@@ -1,5 +1,6 @@
 """
 Fast-SRGAN 모델을 사용한 Y_low 복원 및 벤치마크
+TPU v5 지원 추가
 """
 
 import os
@@ -12,41 +13,67 @@ from tqdm import tqdm
 import time
 from torch.amp import autocast
 
+# TPU 지원
+try:
+    import torch_xla.core.xla_model as xm
+    TPU_AVAILABLE = True
+except ImportError:
+    TPU_AVAILABLE = False
+    xm = None
+
 from FastSRGANconfig import fast_srgan_config as config
 from FastSRGAN_models import FastSRGANGenerator
 
 def load_fast_srgan_model():
     """Fast-SRGAN Generator 모델 로드"""
-    device = torch.device(config.device)
+    # 디바이스 설정
+    if config.device == 'tpu':
+        if not TPU_AVAILABLE:
+            print("TPU requested but torch_xla not available. Falling back to CUDA/CPU.")
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            use_tpu = False
+        else:
+            device = xm.xla_device()
+            use_tpu = True
+            print(f"Using TPU device: {device}")
+    else:
+        device = torch.device(config.device)
+        use_tpu = False
+    
     generator = FastSRGANGenerator().to(device)
     
-    # T4 GPU 최적화 (추론용)
+    # 디바이스별 최적화 (추론용)
     if device.type == 'cuda':
         torch.backends.cudnn.benchmark = True
         torch.backends.cudnn.allow_tf32 = True
         torch.backends.cuda.matmul.allow_tf32 = True
+    elif use_tpu:
+        print("TPU inference optimizations enabled")
     
     model_path = config.model_path_gen
     if os.path.exists(model_path):
-        generator.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
+        if use_tpu:
+            generator.load_state_dict(torch.load(model_path, map_location='cpu', weights_only=True))
+            generator = generator.to(device)
+        else:
+            generator.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
         print(f"Fast-SRGAN Generator loaded from {model_path}")
     else:
         print(f"Model file not found: {model_path}")
-        return None, None
+        return None, None, False
     
     generator.eval()
-    return generator, device
+    return generator, device, use_tpu
 
 def reconstruct_images_fast_srgan():
     """Fast-SRGAN을 사용한 이미지 복원"""
-    generator, device = load_fast_srgan_model()
+    generator, device, use_tpu = load_fast_srgan_model()
     if generator is None:
         return
     
     print(f"Using device: {device}")
     if device.type == 'cuda':
         print(f"Using FP16: {config.use_amp}")
-        print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f}GB")
     
     # 모든 비디오 폴더 찾기
     video_dirs = [d for d in os.listdir(config.work_dir) 
@@ -89,11 +116,15 @@ def reconstruct_images_fast_srgan():
                     img_tensor = torch.from_numpy(img_array).unsqueeze(0).unsqueeze(0).to(device)
                     
                     # 모델 추론
-                    if config.use_amp and device.type == 'cuda':
+                    if config.use_amp and device.type == 'cuda' and not use_tpu:
                         with autocast(device_type='cuda'):
                             output = generator(img_tensor)
                     else:
                         output = generator(img_tensor)
+                    
+                    # TPU에서 동기화
+                    if use_tpu:
+                        xm.mark_step()
                     
                     # 후처리 및 저장
                     output_array = output.squeeze().cpu().numpy()
@@ -136,7 +167,7 @@ def reconstruct_images_fast_srgan():
 
 def benchmark_fast_srgan():
     """Fast-SRGAN 속도 벤치마크"""
-    generator, device = load_fast_srgan_model()
+    generator, device, use_tpu = load_fast_srgan_model()
     if generator is None:
         return
     
@@ -145,7 +176,7 @@ def benchmark_fast_srgan():
     
     print(f"\n=== Fast-SRGAN Benchmark ===")
     print(f"Device: {device}")
-    print(f"Using FP16: {config.use_amp and device.type == 'cuda'}")
+    print(f"Using FP16: {config.use_amp and device.type == 'cuda' and not use_tpu}")
     print(f"Resolution: {resolution[1]}x{resolution[0]}")
     print(f"Test frames: {num_frames}")
     
@@ -158,16 +189,21 @@ def benchmark_fast_srgan():
     print("Warming up...")
     with torch.no_grad():
         for _ in range(10):
-            if config.use_amp and device.type == 'cuda':
+            if config.use_amp and device.type == 'cuda' and not use_tpu:
                 with autocast(device_type='cuda'):
                     _ = generator(dummy_input)
             else:
                 _ = generator(dummy_input)
+            
+            if use_tpu:
+                xm.mark_step()
     
     # 메모리 정리
     if device.type == 'cuda':
         torch.cuda.empty_cache()
         torch.cuda.synchronize()
+    elif use_tpu:
+        xm.mark_step()
     
     # 속도 측정
     print("Benchmarking...")
@@ -175,11 +211,14 @@ def benchmark_fast_srgan():
     
     with torch.no_grad():
         for i in tqdm(range(num_frames), desc="Benchmark"):
-            if config.use_amp and device.type == 'cuda':
+            if config.use_amp and device.type == 'cuda' and not use_tpu:
                 with autocast(device_type='cuda'):
                     output = generator(dummy_input)
             else:
                 output = generator(dummy_input)
+            
+            if use_tpu:
+                xm.mark_step()
             
             # 중간 결과 확인 (처음과 마지막)
             if i == 0 or i == num_frames - 1:
@@ -192,6 +231,8 @@ def benchmark_fast_srgan():
     
     if device.type == 'cuda':
         torch.cuda.synchronize()
+    elif use_tpu:
+        xm.mark_step()
     
     total_time = time.time() - start_time
     fps = num_frames / total_time
@@ -202,6 +243,8 @@ def benchmark_fast_srgan():
         memory_allocated = torch.cuda.memory_allocated(device) / 1024**3
         memory_reserved = torch.cuda.memory_reserved(device) / 1024**3
         memory_stats = f"Memory: {memory_allocated:.2f}GB allocated, {memory_reserved:.2f}GB reserved"
+    elif use_tpu:
+        memory_stats = "TPU mode"
     else:
         memory_stats = "CPU mode"
     
