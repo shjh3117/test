@@ -10,6 +10,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import torch.nn.functional as F
+from torch.cuda.amp import GradScaler, autocast
 from PIL import Image
 import numpy as np
 from tqdm import tqdm
@@ -127,6 +128,15 @@ def train_model():
     device = torch.device(config.device)
     print(f"Using device: {device}")
     
+    # FP16 설정 확인
+    use_amp = config.use_amp and device.type == 'cuda'
+    if use_amp:
+        print("Using Automatic Mixed Precision (FP16) training")
+        scaler = GradScaler()
+    else:
+        print("Using FP32 training")
+        scaler = None
+    
     # 데이터셋
     dataset = VideoDataset()
     if len(dataset) == 0:
@@ -153,6 +163,15 @@ def train_model():
     
     # 모델 및 손실함수
     model = ESPCN().to(device)
+    
+    # T4 GPU 최적화
+    if device.type == 'cuda':
+        # cuDNN 벤치마킹 활성화 (입력 크기가 고정인 경우 성능 향상)
+        torch.backends.cudnn.benchmark = True
+        # 텐서 코어 사용을 위한 설정
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+    
     criterion = CombinedLoss()
     
     # 옵티마이저 설정
@@ -189,10 +208,22 @@ def train_model():
             input_img, target_img = input_img.to(device), target_img.to(device)
             
             optimizer.zero_grad()
-            pred_img = model(input_img)
-            loss = criterion(pred_img, target_img)
-            loss.backward()
-            optimizer.step()
+            
+            if use_amp:
+                # FP16 mixed precision training
+                with autocast():
+                    pred_img = model(input_img)
+                    loss = criterion(pred_img, target_img)
+                
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                # FP32 training
+                pred_img = model(input_img)
+                loss = criterion(pred_img, target_img)
+                loss.backward()
+                optimizer.step()
             
             train_loss += loss.item()
         
@@ -202,13 +233,28 @@ def train_model():
         with torch.no_grad():
             for input_img, target_img in val_loader:
                 input_img, target_img = input_img.to(device), target_img.to(device)
-                pred_img = model(input_img)
-                val_loss += criterion(pred_img, target_img).item()
+                
+                if use_amp:
+                    with autocast():
+                        pred_img = model(input_img)
+                        loss = criterion(pred_img, target_img)
+                else:
+                    pred_img = model(input_img)
+                    loss = criterion(pred_img, target_img)
+                    
+                val_loss += loss.item()
         
         avg_train_loss = train_loss / len(train_loader)
         avg_val_loss = val_loss / len(val_loader)
         
-        print(f"Epoch {epoch+1}: Train={avg_train_loss:.6f}, Val={avg_val_loss:.6f}")
+        # GPU 메모리 사용량 출력 (CUDA인 경우)
+        if device.type == 'cuda':
+            gpu_memory = torch.cuda.memory_allocated(device) / 1024**3  # GB
+            gpu_memory_max = torch.cuda.max_memory_allocated(device) / 1024**3  # GB
+            print(f"Epoch {epoch+1}: Train={avg_train_loss:.6f}, Val={avg_val_loss:.6f}, "
+                  f"GPU Mem: {gpu_memory:.2f}GB (Max: {gpu_memory_max:.2f}GB)")
+        else:
+            print(f"Epoch {epoch+1}: Train={avg_train_loss:.6f}, Val={avg_val_loss:.6f}")
         
         # 스케줄러 업데이트
         if scheduler:

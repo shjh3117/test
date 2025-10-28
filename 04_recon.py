@@ -9,6 +9,7 @@ import torch.nn as nn
 import numpy as np
 from PIL import Image
 from tqdm import tqdm
+from torch.cuda.amp import autocast
 from ESPCNconfig import config
 
 class ESPCN(nn.Module):
@@ -59,16 +60,16 @@ class ESPCN(nn.Module):
 def load_model():
     device = torch.device(config.device)
     model = ESPCN().to(device)
-def load_model(config):
-    device = torch.device(config.device)
-    model = ESPCN(config).to(device)
-def load_model():
-    device = torch.device(config.device)
-    model = ESPCN().to(device)
+    
+    # T4 GPU 최적화 (추론용)
+    if device.type == 'cuda':
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cuda.matmul.allow_tf32 = True
     
     model_path = config.model_path
     if os.path.exists(model_path):
-        model.load_state_dict(torch.load(model_path, map_location=device))
+        model.load_state_dict(torch.load(model_path, map_location=device, weights_only=True))
         print(f"Model loaded from {model_path}")
     else:
         print(f"Model file not found: {model_path}")
@@ -83,6 +84,9 @@ def reconstruct_images():
         return
     
     print(f"Using device: {device}")
+    if device.type == 'cuda':
+        print(f"Using FP16: {config.use_amp}")
+        print(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f}GB")
     
     # 모든 비디오 폴더 찾기
     video_dirs = [d for d in os.listdir(config.work_dir) 
@@ -116,7 +120,7 @@ def reconstruct_images():
                     
                     # 모델 추론
                     if config.use_amp and device.type == 'cuda':
-                        with torch.cuda.amp.autocast():
+                        with autocast():
                             output = model(img_tensor)
                     else:
                         output = model(img_tensor)
@@ -156,7 +160,7 @@ def benchmark_speed():
     with torch.no_grad():
         for _ in range(10):
             if config.use_amp and device.type == 'cuda':
-                with torch.cuda.amp.autocast():
+                with autocast():
                     _ = model(dummy_input)
             else:
                 _ = model(dummy_input)
@@ -169,7 +173,7 @@ def benchmark_speed():
     with torch.no_grad():
         for _ in range(num_frames):
             if config.use_amp and device.type == 'cuda':
-                with torch.cuda.amp.autocast():
+                with autocast():
                     _ = model(dummy_input)
             else:
                 _ = model(dummy_input)
@@ -181,6 +185,8 @@ def benchmark_speed():
     fps = num_frames / total_time
     
     print(f"Benchmark Results:")
+    print(f"Device: {device}")
+    print(f"Using FP16: {config.use_amp and device.type == 'cuda'}")
     print(f"Resolution: {resolution[1]}x{resolution[0]}")
     print(f"Processed {num_frames} frames in {total_time:.2f}s")
     print(f"Average FPS: {fps:.2f}")
