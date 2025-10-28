@@ -60,7 +60,8 @@ class FastSRGANConfig:
     
     # 시스템 설정
     device: str = 'auto'  # 'auto', 'cuda', 'cpu', 'tpu'
-    tpu_cores: int = 8  # TPU 코어 수 (v5 기준)
+    # TPU 설정: nprocs는 자동으로 모든 디바이스 사용
+    # 디바이스 수를 제한하려면 환경 변수 TPU_NUM_DEVICES 사용
     
     # 검증 및 저장 설정
     save_interval: int = 1  # 몇 epoch마다 모델 저장

@@ -464,7 +464,8 @@ def _mp_fn(index):
 if __name__ == "__main__":
     if config.device == 'tpu' and TPU_AVAILABLE:
         # TPU 멀티프로세싱 실행
-        xmp.spawn(_mp_fn, args=(), nprocs=config.tpu_cores)
+        # nprocs=None을 사용하여 모든 사용 가능한 TPU 디바이스 자동 사용
+        xmp.spawn(_mp_fn, args=(), nprocs=None)
     else:
         # 일반 실행
         train_fast_srgan()

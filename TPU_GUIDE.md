@@ -16,7 +16,12 @@ pip install torch torch_xla -f https://storage.googleapis.com/libtpu-releases/in
 
 ```python
 config.device = 'tpu'  # 또는 'auto'로 설정하면 자동 감지
-config.tpu_cores = 8   # TPU v5 코어 수
+```
+
+TPU 디바이스 수 제한 (선택사항):
+```bash
+# 환경 변수로 TPU 디바이스 수 제한
+export TPU_NUM_DEVICES=4  # 4개 디바이스만 사용
 ```
 
 ### 3. 학습 실행
@@ -42,12 +47,14 @@ python 04_recon_FastSRGAN.py  # 메인 함수에서 benchmark_fast_srgan() 호�
 - **높은 처리량**: GPU 대비 높은 배치 처리 성능
 - **메모리**: 16GB HBM per core (v5e는 8개 코어 = 128GB)
 - **가격 대비 성능**: 학습 비용 효율적
+- **자동 스케일링**: 사용 가능한 모든 TPU 디바이스 자동 활용
 
 ### 주의사항
 1. **데이터 로딩**: TPU는 `num_workers=0` 사용 권장
 2. **그래디언트 동기화**: `xm.mark_step()`으로 주기적 동기화 필요
 3. **모델 저장**: master ordinal에서만 저장 (멀티프로세싱 시)
 4. **배치 크기**: TPU는 큰 배치 크기에 최적화됨 (8, 16, 32 등)
+5. **디바이스 수**: `nprocs=None`으로 모든 디바이스 자동 사용
 
 ## 성능 최적화 팁
 
@@ -56,9 +63,11 @@ python 04_recon_FastSRGAN.py  # 메인 함수에서 benchmark_fast_srgan() 호�
 config.batch_size = 8  # GPU: 1~2, TPU: 8~32
 ```
 
-### TPU 코어 수 조정
-```python
-config.tpu_cores = 8  # v5e: 8 cores, v5p: 8 cores per chip
+### TPU 디바이스 수 제한 (선택사항)
+```bash
+# 환경 변수로 제어
+export TPU_NUM_DEVICES=4  # 4개 디바이스만 사용
+# 기본값: None (모든 사용 가능한 디바이스 사용)
 ```
 
 ### 학습 속도 향상
@@ -92,3 +101,10 @@ print(device)  # xla:0이 출력되어야 함
 - 배치 크기를 8 이상으로 증가
 - `xm.mark_step()` 빈도 조정 (현재 10 iteration마다)
 - 데이터셋 크기 확인 (너무 작으면 오버헤드가 큼)
+
+### nprocs 에러
+```
+ValueError: Unsupported nprocs (8)
+```
+- 최신 torch_xla는 `nprocs=None` 사용 (자동으로 모든 디바이스 활용)
+- 디바이스 수 제한: `export TPU_NUM_DEVICES=원하는숫자`

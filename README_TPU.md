@@ -26,9 +26,10 @@ python 03_train_FastSRGAN.py
 ## 주요 기능
 
 ✅ **자동 디바이스 감지**: TPU > CUDA > CPU 순서로 자동 선택  
-✅ **멀티코어 학습**: TPU 8코어 병렬 학습  
+✅ **멀티코어 학습**: 모든 사용 가능한 TPU 디바이스 자동 활용  
 ✅ **하위 호환성**: torch_xla 없어도 GPU/CPU에서 정상 작동  
 ✅ **최적화**: TPU용 데이터 로딩 및 그래디언트 동기화  
+✅ **유연한 설정**: 환경 변수로 디바이스 수 제어 가능  
 
 ## 설정 방법
 
@@ -40,9 +41,12 @@ device = 'tpu'       # TPU 강제
 device = 'cuda'      # GPU 강제
 device = 'cpu'       # CPU 강제
 
-# TPU 설정
-tpu_cores = 8        # v5e 기준
 batch_size = 16      # TPU는 큰 배치 권장
+```
+
+TPU 디바이스 수 제한 (선택사항):
+```bash
+export TPU_NUM_DEVICES=4  # 4개 디바이스만 사용
 ```
 
 ## 파일 목록

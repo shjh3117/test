@@ -8,13 +8,14 @@ Fast-SRGAN 프로젝트에 Google Cloud TPU v5 지원을 추가했습니다. 이
 ### 1. FastSRGANconfig.py
 **변경 내용:**
 - `device` 옵션에 'tpu' 추가
-- `tpu_cores` 설정 추가 (기본값: 8)
+- TPU 디바이스 자동 감지 (nprocs=None으로 모든 디바이스 사용)
 - `__post_init__` 메서드에서 TPU 자동 감지 로직 추가
 
 **주요 코드:**
 ```python
 device: str = 'auto'  # 'auto', 'cuda', 'cpu', 'tpu'
-tpu_cores: int = 8    # TPU 코어 수
+# TPU는 자동으로 모든 사용 가능한 디바이스 활용
+# 환경 변수 TPU_NUM_DEVICES로 제한 가능
 ```
 
 ### 2. 03_train_FastSRGAN.py
@@ -28,9 +29,10 @@ tpu_cores: int = 8    # TPU 코어 수
 - TPU 멀티프로세싱 지원 (`xmp.spawn`)
 
 **주요 기능:**
-- TPU 8코어 멀티프로세싱 학습
+- TPU 멀티프로세싱 학습 (자동으로 모든 디바이스 사용)
 - 자동 그래디언트 동기화
 - TPU 최적화된 데이터 로딩
+- 환경 변수로 디바이스 수 제어 가능
 
 ### 3. 04_recon_FastSRGAN.py
 **변경 내용:**
@@ -116,7 +118,11 @@ device = 'auto'  # 자동 (TPU > CUDA > CPU)
 # FastSRGANconfig.py
 batch_size = 16           # TPU에서 큰 배치 크기 사용
 learning_rate_gen = 1e-3  # 배치 크기에 비례하여 증가
-tpu_cores = 8            # v5e 기준
+```
+
+```bash
+# 디바이스 수 제한 (선택사항)
+export TPU_NUM_DEVICES=4
 ```
 
 ### GPU 최적화 설정
