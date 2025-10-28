@@ -9,7 +9,7 @@ class FastSRGANConfig:
     """Fast-SRGAN 설정 클래스"""
     
     # 모델 구조 - Generator
-    gen_num_features: int = 96  # 경량화를 위해 ESPCN보다 적게
+    gen_num_features: int = 64  # 경량화를 위해 ESPCN보다 적게
     gen_num_residual_blocks: int = 8
     gen_upscale_factor: int = 1  # 1:1 복원 (업스케일링 없음)
     use_mobile_blocks: bool = True  # MobileNet-style blocks 사용
