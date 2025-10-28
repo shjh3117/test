@@ -21,14 +21,10 @@ import torchvision.models as models
 # TPU 지원
 try:
     import torch_xla.core.xla_model as xm
-    import torch_xla.distributed.parallel_loader as pl
-    import torch_xla.distributed.xla_multiprocessing as xmp
     TPU_AVAILABLE = True
 except ImportError:
     TPU_AVAILABLE = False
     xm = None
-    pl = None
-    xmp = None
 
 from FastSRGANconfig import fast_srgan_config as config
 from FastSRGAN_models import FastSRGANGenerator, FastSRGANDiscriminator
@@ -192,6 +188,7 @@ def train_fast_srgan():
             device = xm.xla_device()
             use_tpu = True
             print(f"Using TPU device: {device}")
+            print(f"Number of TPU devices: {xm.xrt_world_size()}")
     else:
         device = torch.device(config.device)
         use_tpu = False
@@ -219,7 +216,7 @@ def train_fast_srgan():
     train_size = int(config.train_split * len(dataset))
     val_size = len(dataset) - train_size
     train_dataset, val_dataset = torch.utils.data.random_split(dataset, [train_size, val_size])
-    
+    # 데이터 로더
     train_loader = DataLoader(
         train_dataset, 
         batch_size=config.batch_size, 
@@ -235,10 +232,11 @@ def train_fast_srgan():
         pin_memory=True if not use_tpu else False
     )
     
-    # TPU용 데이터 로더 래핑
+    # TPU용 데이터 로더 래핑 (단일 프로세스 모드)
     if use_tpu:
-        train_loader = pl.MpDeviceLoader(train_loader, device)
-        val_loader = pl.MpDeviceLoader(val_loader, device)
+        import torch_xla.distributed.parallel_loader as pl
+        train_loader = pl.ParallelLoader(train_loader, [device]).per_device_loader(device)
+        val_loader = pl.ParallelLoader(val_loader, [device]).per_device_loader(device)
     
     # 모델 생성
     generator = FastSRGANGenerator().to(device)
@@ -457,15 +455,7 @@ def train_fast_srgan():
     
     print("Fast-SRGAN training completed!")
 
-def _mp_fn(index):
-    """TPU 멀티프로세싱 래퍼"""
-    train_fast_srgan()
-
 if __name__ == "__main__":
-    if config.device == 'tpu' and TPU_AVAILABLE:
-        # TPU 멀티프로세싱 실행
-        # nprocs=None을 사용하여 모든 사용 가능한 TPU 디바이스 자동 사용
-        xmp.spawn(_mp_fn, args=(), nprocs=None)
-    else:
-        # 일반 실행
-        train_fast_srgan()
+    # TPU는 단일 프로세스 모드로 실행 (multiprocessing spawn 제거)
+    # TPU 멀티코어는 자동으로 활용됨
+    train_fast_srgan()

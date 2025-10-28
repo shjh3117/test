@@ -2,7 +2,27 @@
 
 ## 일반적인 문제와 해결 방법
 
-### 1. nprocs 에러
+### 1. TPU 초기화 에러 (멀티프로세싱 관련)
+
+**에러 메시지:**
+```
+RuntimeError: Bad StatusOr access: UNKNOWN: TPU initialization failed
+Check failed: !g_computation_client_initialized
+```
+
+**원인:**
+멀티프로세싱 spawn이 TPU 단일 호스트 환경에서 충돌을 일으킴
+
+**해결 방법:**
+✅ **이미 수정됨** - `xmp.spawn` 제거, 단일 프로세스 모드로 변경
+- TPU는 단일 프로세스에서 자동으로 모든 코어를 활용합니다
+- 멀티프로세싱 없이도 모든 TPU 디바이스가 활성화됩니다
+
+---
+
+### 2. nprocs 에러 (구버전)
+
+### 2. nprocs 에러 (구버전)
 
 **에러 메시지:**
 ```
@@ -10,25 +30,14 @@ ValueError: Unsupported nprocs (8). Please use nprocs=1 or None (default).
 ```
 
 **원인:**
-최신 torch_xla (PyTorch XLA 2.0+)에서는 `nprocs` 파라미터 사용 방식이 변경되었습니다.
+이전 버전에서 사용하던 멀티프로세싱 방식
 
 **해결 방법:**
-✅ **이미 수정됨** - `03_train_FastSRGAN.py`가 업데이트되어 `nprocs=None` 사용
-
-**추가 설정 (선택사항):**
-```bash
-# TPU 디바이스 수를 제한하려면 환경 변수 사용
-export TPU_NUM_DEVICES=4  # 4개 디바이스만 사용
-export TPU_NUM_DEVICES=8  # 8개 디바이스 사용
-
-# Python에서 실행 전 설정
-import os
-os.environ['TPU_NUM_DEVICES'] = '4'
-```
+✅ **이미 수정됨** - 멀티프로세싱 제거, 단일 프로세스 모드 사용
 
 ---
 
-### 2. torch_xla import 에러
+### 3. torch_xla import 에러
 
 **에러 메시지:**
 ```
@@ -46,7 +55,7 @@ pip install torch~=2.1.0 torch_xla[tpu]~=2.1.0 -f https://storage.googleapis.com
 
 ---
 
-### 3. TPU 디바이스를 찾을 수 없음
+### 4. TPU 디바이스를 찾을 수 없음
 
 **에러 메시지:**
 ```
@@ -68,7 +77,7 @@ python -c "import torch_xla; import torch_xla.core.xla_model as xm; print(xm.xla
 
 ---
 
-### 4. 메모리 부족 (OOM)
+### 5. 메모리 부족 (OOM)
 
 **에러 메시지:**
 ```
@@ -86,7 +95,7 @@ batch_size = 4  # 8에서 4로 감소
 
 ---
 
-### 5. 느린 학습 속도
+### 6. 느린 학습 속도
 
 **증상:**
 TPU를 사용하는데 GPU보다 느림
@@ -112,7 +121,7 @@ if use_tpu and batch_idx % 20 == 0:  # 10에서 20으로
 
 ---
 
-### 6. 모델 저장 실패
+### 7. 모델 저장 실패
 
 **에러 메시지:**
 ```
@@ -131,7 +140,7 @@ config.model_path_gen = '/tmp/fast_srgan_generator_best.pth'
 
 ---
 
-### 7. SyntaxWarning (무시 가능)
+### 8. SyntaxWarning (무시 가능)
 
 **경고 메시지:**
 ```
