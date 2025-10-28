@@ -9,7 +9,7 @@ import torch.nn as nn
 import numpy as np
 from PIL import Image
 from tqdm import tqdm
-from torch.cuda.amp import autocast
+from torch.amp import autocast
 from ESPCNconfig import config
 
 class ESPCN(nn.Module):
@@ -120,7 +120,7 @@ def reconstruct_images():
                     
                     # 모델 추론
                     if config.use_amp and device.type == 'cuda':
-                        with autocast():
+                        with autocast(device_type='cuda'):
                             output = model(img_tensor)
                     else:
                         output = model(img_tensor)
@@ -160,7 +160,7 @@ def benchmark_speed():
     with torch.no_grad():
         for _ in range(10):
             if config.use_amp and device.type == 'cuda':
-                with autocast():
+                with autocast(device_type='cuda'):
                     _ = model(dummy_input)
             else:
                 _ = model(dummy_input)
@@ -173,7 +173,7 @@ def benchmark_speed():
     with torch.no_grad():
         for _ in range(num_frames):
             if config.use_amp and device.type == 'cuda':
-                with autocast():
+                with autocast(device_type='cuda'):
                     _ = model(dummy_input)
             else:
                 _ = model(dummy_input)

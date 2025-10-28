@@ -10,7 +10,8 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import Dataset, DataLoader
 import torch.nn.functional as F
-from torch.cuda.amp import GradScaler, autocast
+from torch.cuda.amp import GradScaler
+from torch.amp import autocast
 from PIL import Image
 import numpy as np
 from tqdm import tqdm
@@ -211,7 +212,7 @@ def train_model():
             
             if use_amp:
                 # FP16 mixed precision training
-                with autocast():
+                with autocast(device_type='cuda'):
                     pred_img = model(input_img)
                     loss = criterion(pred_img, target_img)
                 
@@ -235,7 +236,7 @@ def train_model():
                 input_img, target_img = input_img.to(device), target_img.to(device)
                 
                 if use_amp:
-                    with autocast():
+                    with autocast(device_type='cuda'):
                         pred_img = model(input_img)
                         loss = criterion(pred_img, target_img)
                 else:
