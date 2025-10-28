@@ -9,17 +9,17 @@ class FastSRGANConfig:
     """Fast-SRGAN 설정 클래스"""
     
     # 모델 구조 - Generator
-    gen_num_features: int = 64  # 경량화를 위해 ESPCN보다 적게
+    gen_num_features: int = 96  # 경량화를 위해 ESPCN보다 적게
     gen_num_residual_blocks: int = 8
     gen_upscale_factor: int = 1  # 1:1 복원 (업스케일링 없음)
     use_mobile_blocks: bool = True  # MobileNet-style blocks 사용
     
     # 모델 구조 - Discriminator
     disc_num_features: int = 64
-    disc_num_layers: int = 5
+    disc_num_layers: int = 4
     
     # 훈련 설정
-    num_epochs: int = 3
+    num_epochs: int = 10
     batch_size: int = 1
     learning_rate_gen: float = 1e-4
     learning_rate_disc: float = 1e-4
