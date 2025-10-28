@@ -18,7 +18,7 @@ class ESPCNConfig:
     
     # 훈련 설정
     num_epochs: int = 1
-    batch_size: int = 4  # T4 GPU + FP16에 최적화된 배치 크기
+    batch_size: int = 2  # T4 GPU + FP16에 최적화된 배치 크기
     learning_rate: float = 1e-3
     weight_decay: float = 1e-5
     train_split: float = 0.8
