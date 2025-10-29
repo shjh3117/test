@@ -173,14 +173,14 @@ def train_fast_srgan():
     device = torch.device(config.device)
     print(f"Using device: {device}")
     
-    # FP16 설정
-    use_amp = config.use_amp and device.type == 'cuda'
+    # FP16 설정 (강제 활성화)
+    use_amp = device.type == 'cuda'  # CUDA 사용 시 항상 FP16 사용
     if use_amp:
         print("Using Automatic Mixed Precision (FP16) training")
         scaler_gen = GradScaler('cuda')
         scaler_disc = GradScaler('cuda')
     else:
-        print("Using FP32 training")
+        print("Using FP32 training (CPU mode)")
         scaler_gen = None
         scaler_disc = None
     
@@ -214,11 +214,16 @@ def train_fast_srgan():
     generator = FastSRGANGenerator().to(device)
     discriminator = FastSRGANDiscriminator().to(device)
     
-    # T4 GPU 최적화
+    # T4 GPU 최적화 및 FP16 설정
     if device.type == 'cuda':
         torch.backends.cudnn.benchmark = True
         torch.backends.cudnn.allow_tf32 = True
         torch.backends.cuda.matmul.allow_tf32 = True
+        print("CUDA optimizations enabled (TF32, cuDNN benchmark)")
+        
+        # FP16을 위한 추가 최적화
+        torch.backends.cudnn.enabled = True
+        torch.backends.cudnn.deterministic = False  # 성능 향상을 위해 비결정적 허용
     
     # 손실함수
     criterion = CombinedLoss().to(device)

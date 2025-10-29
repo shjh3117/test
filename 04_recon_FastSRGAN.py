@@ -65,8 +65,18 @@ def reconstruct_images_fast_srgan():
         return
     
     print(f"Using device: {device}")
+    # FP16 설정 (CUDA 사용 시 강제 활성화)
+    use_fp16 = device.type == 'cuda'
     if device.type == 'cuda':
-        print(f"Using FP16: {config.use_amp}")
+        print(f"Using FP16: {use_fp16}")
+        # CUDA 최적화 설정
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.allow_tf32 = True  
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.enabled = True
+        print("CUDA optimizations enabled for FP16 inference")
+    else:
+        print("Using FP32 (CPU mode)")
     
     # 모든 비디오 폴더 찾기
     video_dirs = [d for d in os.listdir(config.work_dir) 
@@ -108,8 +118,8 @@ def reconstruct_images_fast_srgan():
                     
                     img_tensor = torch.from_numpy(img_array).unsqueeze(0).unsqueeze(0).to(device)
                     
-                    # 모델 추론
-                    if config.use_amp and device.type == 'cuda':
+                    # 모델 추론 (FP16 강제 사용)
+                    if use_fp16:
                         with autocast(device_type='cuda'):
                             output = generator(img_tensor)
                     else:
@@ -165,9 +175,18 @@ def benchmark_fast_srgan():
     
     print(f"\n=== Fast-SRGAN Benchmark ===")
     print(f"Device: {device}")
-    print(f"Using FP16: {config.use_amp and device.type == 'cuda'}")
+    # FP16 설정 (CUDA 사용 시 강제 활성화)
+    use_fp16 = device.type == 'cuda'
+    print(f"Using FP16: {use_fp16}")
     print(f"Resolution: {resolution[1]}x{resolution[0]}")
     print(f"Test frames: {num_frames}")
+    
+    # CUDA 최적화 설정
+    if device.type == 'cuda':
+        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.allow_tf32 = True
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.enabled = True
     
     # 더미 입력 생성 (-1~1 범위)
     dummy_input = torch.randn(1, 1, resolution[0], resolution[1]).to(device)
@@ -178,7 +197,7 @@ def benchmark_fast_srgan():
     print("Warming up...")
     with torch.no_grad():
         for _ in range(10):
-            if config.use_amp and device.type == 'cuda':
+            if use_fp16:
                 with autocast(device_type='cuda'):
                     _ = generator(dummy_input)
             else:
@@ -195,7 +214,7 @@ def benchmark_fast_srgan():
     
     with torch.no_grad():
         for i in tqdm(range(num_frames), desc="Benchmark"):
-            if config.use_amp and device.type == 'cuda':
+            if use_fp16:
                 with autocast(device_type='cuda'):
                     output = generator(dummy_input)
             else:
