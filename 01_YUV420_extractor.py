@@ -97,8 +97,6 @@ def extract_y_frames_to_tensor(video_path, device='cuda', chunk_size=100):
                 with Image.open(png_file) as img:
                     frame = np.array(img, dtype=np.uint8)
                     chunk_frames.append(frame)
-                # 즉시 메모리에서 제거
-                del img
             
             # numpy array로 변환
             chunk_np = np.stack(chunk_frames, axis=0)
@@ -109,11 +107,14 @@ def extract_y_frames_to_tensor(video_path, device='cuda', chunk_size=100):
             del chunk_np  # numpy 메모리 해제
             
             frame_chunks.append(chunk_tensor)
+            del chunk_tensor  # 참조 제거
             
             print(f"  Loaded chunk {i//chunk_size + 1}/{(total_frames + chunk_size - 1)//chunk_size}")
             
             # 메모리 정리
             gc.collect()
+            if device == 'cuda':
+                torch.cuda.empty_cache()
         
         # 모든 청크를 하나의 텐서로 결합
         frames_tensor = torch.cat(frame_chunks, dim=0)
@@ -151,32 +152,42 @@ def detect_scene_changes(y_frames, threshold=0.85, batch_size=50):
     if n_frames <= 1:
         return [0], []
     
-    # 각 프레임을 벡터로 flatten하고 정규화
-    frames_flat = y_frames.reshape(n_frames, -1)  # [N, H*W]
-    frames_norm = torch.nn.functional.normalize(frames_flat, p=2, dim=1)
+    device = y_frames.device
     
     # 배치 단위로 연속된 프레임 간의 코사인 유사도 계산
     similarities_list = []
     
-    for i in range(0, n_frames - 1, batch_size):
-        end_idx = min(i + batch_size, n_frames - 1)
+    try:
+        for i in range(0, n_frames - 1, batch_size):
+            end_idx = min(i + batch_size, n_frames - 1)
+            
+            # 현재 배치의 프레임들을 flatten하고 정규화
+            curr_frames = y_frames[i:end_idx].reshape(end_idx - i, -1)
+            next_frames = y_frames[i+1:end_idx+1].reshape(end_idx - i, -1)
+            
+            # 정규화
+            curr_norm = torch.nn.functional.normalize(curr_frames, p=2, dim=1)
+            next_norm = torch.nn.functional.normalize(next_frames, p=2, dim=1)
+            
+            # 유사도 계산
+            batch_similarities = torch.sum(curr_norm * next_norm, dim=1)
+            similarities_list.append(batch_similarities.cpu())
+            
+            # 배치 처리 후 즉시 메모리 해제
+            del curr_frames, next_frames, curr_norm, next_norm, batch_similarities
+            
+            if device.type == 'cuda':
+                torch.cuda.empty_cache()
         
-        # 현재 프레임들과 다음 프레임들 간의 유사도 계산
-        curr_batch = frames_norm[i:end_idx]
-        next_batch = frames_norm[i+1:end_idx+1]
+        # 모든 유사도 결합
+        similarities = torch.cat(similarities_list).numpy()
+        del similarities_list
         
-        batch_similarities = torch.sum(curr_batch * next_batch, dim=1)
-        similarities_list.append(batch_similarities.cpu())
-        
-        # 배치 처리 후 메모리 정리
-        del curr_batch, next_batch, batch_similarities
-        if y_frames.is_cuda:
+    finally:
+        # 최종 메모리 정리
+        gc.collect()
+        if device.type == 'cuda':
             torch.cuda.empty_cache()
-    
-    # 모든 유사도 결합
-    similarities = torch.cat(similarities_list).numpy()
-    del similarities_list
-    gc.collect()
     
     # 유사도가 임계값보다 낮은 지점을 scene 변화로 감지
     scene_changes = (similarities < threshold)
@@ -269,7 +280,7 @@ def extract_scene_yuv(video_path, scene_start, scene_end, output_dir):
         gc.collect()
 
 def YUV420_extractor(input_dir='videos', output_dir='work_dir', similarity_threshold=0.85, 
-                     chunk_size=100, batch_size=50):
+                     chunk_size=100, batch_size=50, force_cpu=False):
     """
     YUV420 비디오에서 Y 프레임 유사성 기반으로 scene을 감지하고,
     scene별로 Y, U, V 채널을 추출하여 PNG로 저장
@@ -281,10 +292,26 @@ def YUV420_extractor(input_dir='videos', output_dir='work_dir', similarity_thres
         similarity_threshold: scene 감지 임계값 (낮을수록 민감)
         chunk_size: 프레임 로딩 청크 크기 (메모리 사용량 조절)
         batch_size: scene 감지 배치 크기 (메모리 사용량 조절)
+        force_cpu: True이면 GPU 사용 안함 (메모리 부족 시)
     """
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    if force_cpu:
+        device = 'cpu'
+        print("Forced CPU mode")
+    else:
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
     print(f"Using device: {device}")
     print(f"Memory optimization: chunk_size={chunk_size}, batch_size={batch_size}")
+    
+    if device == 'cuda':
+        # GPU 메모리 상태 출력
+        gpu_mem_total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        gpu_mem_allocated = torch.cuda.memory_allocated(0) / 1024**3
+        print(f"GPU memory: {gpu_mem_allocated:.2f}GB / {gpu_mem_total:.2f}GB")
+        
+        # GPU 메모리 초기화
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
     
     # 입력 디렉토리에서 모든 비디오 파일 찾기
     video_extensions = ['*.mp4', '*.avi', '*.mov', '*.mkv', '*.wmv', '*.flv']
@@ -304,11 +331,23 @@ def YUV420_extractor(input_dir='videos', output_dir='work_dir', similarity_thres
         print(f"{'='*60}")
         
         y_frames = None
+        scene_boundaries = None
+        similarities = None
         
         try:
             # Y 프레임 추출 (청크 단위)
             print("Extracting Y frames with memory optimization...")
-            y_frames = extract_y_frames_to_tensor(video_path, device=device, chunk_size=chunk_size)
+            
+            try:
+                y_frames = extract_y_frames_to_tensor(video_path, device=device, chunk_size=chunk_size)
+            except RuntimeError as e:
+                if 'out of memory' in str(e).lower() and device == 'cuda':
+                    print(f"⚠ GPU out of memory! Falling back to CPU...")
+                    torch.cuda.empty_cache()
+                    device = 'cpu'
+                    y_frames = extract_y_frames_to_tensor(video_path, device=device, chunk_size=chunk_size)
+                else:
+                    raise
             
             if y_frames is None:
                 print(f"Failed to extract frames from {video_path}")
@@ -318,20 +357,39 @@ def YUV420_extractor(input_dir='videos', output_dir='work_dir', similarity_thres
             
             # Scene 감지 (배치 단위)
             print("Detecting scene changes with memory optimization...")
-            scene_boundaries, similarities = detect_scene_changes(
-                y_frames, threshold=similarity_threshold, batch_size=batch_size
-            )
+            
+            try:
+                scene_boundaries, similarities = detect_scene_changes(
+                    y_frames, threshold=similarity_threshold, batch_size=batch_size
+                )
+            except RuntimeError as e:
+                if 'out of memory' in str(e).lower() and device == 'cuda':
+                    print(f"⚠ GPU out of memory during scene detection! Moving to CPU...")
+                    y_frames = y_frames.cpu()
+                    device = 'cpu'
+                    torch.cuda.empty_cache()
+                    scene_boundaries, similarities = detect_scene_changes(
+                        y_frames, threshold=similarity_threshold, batch_size=batch_size
+                    )
+                else:
+                    raise
+            
+            # similarities는 더 이상 필요 없으므로 즉시 해제
+            del similarities
+            similarities = None
+            
             scene_boundaries.append(y_frames.shape[0])  # 마지막 프레임
             
             print(f"Detected {len(scene_boundaries)-1} scenes")
             print(f"Scene boundaries: {scene_boundaries}")
             
-            # Y 프레임 메모리 해제 (scene 감지 완료 후)
+            # Y 프레임 메모리 해제 (scene 감지 완료 후 즉시!)
             del y_frames
             y_frames = None
             gc.collect()
             if device == 'cuda':
                 torch.cuda.empty_cache()
+                print(f"GPU memory cleared after scene detection")
             
             # Scene별로 Y, U, V 추출
             for scene_idx in range(len(scene_boundaries) - 1):
@@ -351,6 +409,8 @@ def YUV420_extractor(input_dir='videos', output_dir='work_dir', similarity_thres
                 
                 # Scene 추출 후 메모리 정리
                 gc.collect()
+                if device == 'cuda':
+                    torch.cuda.empty_cache()
             
             print(f"\n✓ Successfully processed {video_name}")
             
@@ -360,21 +420,43 @@ def YUV420_extractor(input_dir='videos', output_dir='work_dir', similarity_thres
             traceback.print_exc()
             continue
         finally:
-            # GPU/메모리 완전 해제
+            # GPU/메모리 완전 해제 - 모든 변수 명시적 삭제
             if y_frames is not None:
                 del y_frames
-            if 'similarities' in locals():
+            if similarities is not None:
                 del similarities
-            if 'scene_boundaries' in locals():
+            if scene_boundaries is not None:
                 del scene_boundaries
             
+            # 강제 가비지 컬렉션
             gc.collect()
             if device == 'cuda':
                 torch.cuda.empty_cache()
+                torch.cuda.synchronize()  # GPU 작업 완료 대기
             
             print(f"Memory cleanup completed for {video_name}")
 
 if __name__ == "__main__":
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='YUV420 Video Scene Extractor with Memory Optimization')
+    parser.add_argument('--input_dir', default='videos', help='Input video directory')
+    parser.add_argument('--output_dir', default='work_dir', help='Output directory')
+    parser.add_argument('--threshold', type=float, default=0.9, help='Scene detection threshold')
+    parser.add_argument('--chunk_size', type=int, default=100, help='Frame loading chunk size')
+    parser.add_argument('--batch_size', type=int, default=50, help='Scene detection batch size')
+    parser.add_argument('--cpu', action='store_true', help='Force CPU mode (if GPU memory is limited)')
+    
+    args = parser.parse_args()
+    
     # 메모리 사용량에 따라 chunk_size와 batch_size 조정
-    # GPU 메모리가 작으면 chunk_size=50, batch_size=25 등으로 줄이기
-    YUV420_extractor(similarity_threshold=0.9, chunk_size=100, batch_size=50)
+    # GPU 메모리가 작으면 --chunk_size=50 --batch_size=25 등으로 줄이기
+    # GPU 메모리 부족 시 --cpu 플래그 사용
+    YUV420_extractor(
+        input_dir=args.input_dir,
+        output_dir=args.output_dir,
+        similarity_threshold=args.threshold, 
+        chunk_size=args.chunk_size, 
+        batch_size=args.batch_size,
+        force_cpu=args.cpu
+    )
