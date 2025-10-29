@@ -18,7 +18,7 @@ import torchvision.transforms as transforms
 import torchvision.models as models
 
 from FastSRGANconfig import fast_srgan_config as config
-from FastSRGAN_models import FastSRGANGenerator, FastSRGANDiscriminator
+from FastSRGAN_models import HighFrequencyGenerator, HighFrequencyDiscriminator
 
 class PerceptualLoss(nn.Module):
     """VGG 기반 Perceptual Loss"""
@@ -211,8 +211,8 @@ def train_fast_srgan():
     )
     
     # 모델 생성
-    generator = FastSRGANGenerator().to(device)
-    discriminator = FastSRGANDiscriminator().to(device)
+    generator = HighFrequencyGenerator().to(device)
+    discriminator = HighFrequencyDiscriminator().to(device)
     
     # T4 GPU 최적화 및 FP16 설정
     if device.type == 'cuda':
