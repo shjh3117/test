@@ -189,7 +189,7 @@ def save_y_frames_as_png(y_frames_tensor, output_dir, channel='Y'):
     
     for i in range(num_frames):
         frame_np = y_frames_tensor[i].numpy().astype(np.uint8)
-        img = Image.fromarray(frame_np, mode='L')
+        img = Image.fromarray(frame_np)
         
         frame_path = os.path.join(channel_dir, f"frame_{i+1:08d}.png")
         img.save(frame_path, compress_level=1)
@@ -235,7 +235,7 @@ def extract_uv_frames(video_path, start_frame, end_frame, output_dir, width, hei
         os.makedirs(u_dir, exist_ok=True)
         
         for i in range(u_frames.shape[0]):
-            img = Image.fromarray(u_frames[i], mode='L')
+            img = Image.fromarray(u_frames[i])
             img.save(os.path.join(u_dir, f"frame_{i+1:08d}.png"), compress_level=1)
         
         print(f"  ✓ Saved {u_frames.shape[0]} U frames")
@@ -264,7 +264,7 @@ def extract_uv_frames(video_path, start_frame, end_frame, output_dir, width, hei
         os.makedirs(v_dir, exist_ok=True)
         
         for i in range(v_frames.shape[0]):
-            img = Image.fromarray(v_frames[i], mode='L')
+            img = Image.fromarray(v_frames[i])
             img.save(os.path.join(v_dir, f"frame_{i+1:08d}.png"), compress_level=1)
         
         print(f"  ✓ Saved {v_frames.shape[0]} V frames")
