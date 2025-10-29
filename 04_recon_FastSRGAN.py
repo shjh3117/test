@@ -211,7 +211,7 @@ def benchmark_fast_srgan():
     print(f"{memory_stats}")
     
     # 다른 해상도에서의 예상 성능
-    resolutions = [(480, 854), (720, 1280), (1080, 1920)]
+    resolutions = [(480, 854), (720, 1280)]
     base_pixels = resolution[0] * resolution[1]
     
     print(f"\n=== Estimated Performance at Different Resolutions ===")
