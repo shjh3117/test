@@ -16,7 +16,7 @@ class FastSRGANConfig:
     
     # 모델 구조 - Discriminator
     disc_num_features: int = 128
-    disc_num_layers: int = 8
+    disc_num_layers: int = 6
     
     # 훈련 설정
     num_epochs: int = 10
