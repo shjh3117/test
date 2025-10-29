@@ -91,14 +91,11 @@ def extract_y_frames_for_scene_detection(video_path, device='cuda', max_frames=2
     frame_size = width * height
     num_frames = len(out) // frame_size
     
-    print(f"DEBUG: Expected {frames_to_load} frames, got {num_frames} frames")
-    print(f"DEBUG: start_frame={start_frame}, end_frame={start_frame + frames_to_load - 1}")
-    
     if num_frames == 0:
         return None, total_frames if total_frames > 0 else 0
     
-    # numpy array로 변환
-    frames_np = np.frombuffer(out, np.uint8).reshape((num_frames, height, width))
+    # numpy array로 변환 (copy()로 writable하게 만들기)
+    frames_np = np.frombuffer(out, np.uint8).reshape((num_frames, height, width)).copy()
     
     # torch tensor로 변환
     frames_tensor = torch.from_numpy(frames_np).float().to(device)
@@ -232,7 +229,7 @@ def extract_uv_frames(video_path, start_frame, end_frame, output_dir, width, hei
         u_width = width // 2
         u_height = height // 2
         frame_size_u = u_width * u_height
-        u_frames = np.frombuffer(out_u, np.uint8).reshape((-1, u_height, u_width))
+        u_frames = np.frombuffer(out_u, np.uint8).reshape((-1, u_height, u_width)).copy()
         
         u_dir = os.path.join(output_dir, 'U')
         os.makedirs(u_dir, exist_ok=True)
@@ -261,7 +258,7 @@ def extract_uv_frames(video_path, start_frame, end_frame, output_dir, width, hei
         )
         
         # V 채널 저장
-        v_frames = np.frombuffer(out_v, np.uint8).reshape((-1, u_height, u_width))
+        v_frames = np.frombuffer(out_v, np.uint8).reshape((-1, u_height, u_width)).copy()
         
         v_dir = os.path.join(output_dir, 'V')
         os.makedirs(v_dir, exist_ok=True)
