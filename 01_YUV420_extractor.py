@@ -443,8 +443,8 @@ if __name__ == "__main__":
     parser.add_argument('--input_dir', default='videos', help='Input video directory')
     parser.add_argument('--output_dir', default='work_dir', help='Output directory')
     parser.add_argument('--threshold', type=float, default=0.9, help='Scene detection threshold')
-    parser.add_argument('--chunk_size', type=int, default=100, help='Frame loading chunk size')
-    parser.add_argument('--batch_size', type=int, default=50, help='Scene detection batch size')
+    parser.add_argument('--chunk_size', type=int, default=50, help='Frame loading chunk size')
+    parser.add_argument('--batch_size', type=int, default=25, help='Scene detection batch size')
     parser.add_argument('--cpu', action='store_true', help='Force CPU mode (if GPU memory is limited)')
     
     args = parser.parse_args()
