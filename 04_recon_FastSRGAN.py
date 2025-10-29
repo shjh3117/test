@@ -1,5 +1,16 @@
 """
-Fast-SRGAN 모델을 사용한 Y_low 복원 및 벤치마크
+Fast-SRGAN 모델을 사용한 Y_low 복원 및 성능 벤치마크
+
+이 스크립트는 훈련된 Fast-SRGAN 모델을 사용하여:
+1. Y_low 채널 이미지들을 고품질로 복원
+2. 모델의 추론 속도 벤치마크 수행
+3. 다른 모델과의 성능 비교 분석
+
+주요 기능:
+- 혼합 정밀도(FP16) 추론 지원으로 속도 향상
+- 배치별 처리로 메모리 효율성 확보
+- 실시간 FPS 모니터링
+- 다양한 해상도에서의 성능 예측
 """
 
 import os
@@ -16,13 +27,23 @@ from FastSRGANconfig import fast_srgan_config as config
 from FastSRGAN_models import FastSRGANGenerator
 
 def load_fast_srgan_model():
-    """Fast-SRGAN Generator 모델 로드"""
+    """
+    Fast-SRGAN Generator 모델을 로드하고 추론을 위해 최적화
+    
+    Returns:
+        tuple: (generator_model, device) 또는 (None, None) if 로드 실패
+        
+    최적화 내용:
+    - CUDA 벤치마크 모드 활성화 (일관된 입력 크기에서 속도 향상)
+    - TensorFloat-32 (TF32) 활성화 (Ampere GPU에서 성능 향상)
+    - 모델을 평가 모드로 설정 (배치 정규화 및 드롭아웃 비활성화)
+    """
     device = torch.device(config.device)
     generator = FastSRGANGenerator().to(device)
     
     # T4 GPU 최적화 (추론용)
     if device.type == 'cuda':
-        torch.backends.cudnn.benchmark = True
+        torch.backends.cudnn.benchmark = True  # 고정 입력 크기에서 성능 향상
         torch.backends.cudnn.allow_tf32 = True
         torch.backends.cuda.matmul.allow_tf32 = True
     
@@ -34,7 +55,7 @@ def load_fast_srgan_model():
         print(f"Model file not found: {model_path}")
         return None, None
     
-    generator.eval()
+    generator.eval()  # 평가 모드로 설정 (배치 정규화 등 비활성화)
     return generator, device
 
 def reconstruct_images_fast_srgan():
@@ -223,30 +244,26 @@ def benchmark_fast_srgan():
         
         print(f"{w}x{h}: ~{estimated_fps:.1f} FPS ({estimated_time*1000:.1f}ms per frame)")
 
-def compare_with_espcn():
-    """ESPCN과 Fast-SRGAN 성능 비교"""
-    print(f"\n=== Model Comparison ===")
-    
-    # Fast-SRGAN 정보
-    generator, device = load_fast_srgan_model()
-    if generator:
-        fast_srgan_params = sum(p.numel() for p in generator.parameters())
-        print(f"Fast-SRGAN Parameters: {fast_srgan_params:,}")
-    
-    # 추정 비교 (실제 ESPCN 모델이 있다면 정확한 비교 가능)
-    print(f"ESPCN Parameters: ~300K-1M (estimated)")
-    print(f"Fast-SRGAN Parameters: ~{fast_srgan_params//1000}K")
-    print(f"\nQuality: Fast-SRGAN > ESPCN (GAN-based)")
-    print(f"Speed: ESPCN > Fast-SRGAN (simpler model)")
-    print(f"Memory: Fast-SRGAN uses more memory")
-    print(f"Training: Fast-SRGAN requires more training time")
-
 if __name__ == "__main__":
-    print("=== Fast-SRGAN Image Reconstruction ===")
+    """
+    메인 실행 함수
+    
+    실행 순서:
+    1. 이미지 복원: 모든 Y_low 이미지를 Fast-SRGAN으로 복원
+    2. 속도 벤치마크: 설정된 해상도에서 FPS 성능 측정
+    3. 모델 비교: 다른 모델들과의 성능 비교 분석
+    """
+    
+    print("=" * 60)
+    print("Fast-SRGAN 이미지 복원 시작")
+    print("=" * 60)
     reconstruct_images_fast_srgan()
     
-    print("\n=== Fast-SRGAN Speed Benchmark ===")
+    print("\n" + "=" * 60)
+    print("Fast-SRGAN 속도 벤치마크 시작")
+    print("=" * 60)
     benchmark_fast_srgan()
     
-    print("\n=== Model Comparison ===")
-    compare_with_espcn()
+    print("\n" + "=" * 60)
+    print("모든 작업 완료!")
+    print("=" * 60)

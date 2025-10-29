@@ -130,7 +130,7 @@ class FastSRGANGenerator(nn.Module):
         
         num_features = config.gen_num_features
         num_residual_blocks = config.gen_num_residual_blocks
-        upscale_factor = config.gen_upscale_factor
+        upscale_factor = 1  # 1:1 복원 (고정값)
         
         # 첫 번째 레이어
         self.conv1 = nn.Sequential(

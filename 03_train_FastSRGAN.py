@@ -226,27 +226,18 @@ def train_fast_srgan():
     # 옵티마이저
     optimizer_gen = optim.Adam(
         generator.parameters(), 
-        lr=config.learning_rate_gen,
-        betas=(config.beta1, config.beta2),
+        lr=config.learning_rate,
         weight_decay=config.weight_decay
     )
     optimizer_disc = optim.Adam(
         discriminator.parameters(), 
-        lr=config.learning_rate_disc,
-        betas=(config.beta1, config.beta2),
+        lr=config.learning_rate,
         weight_decay=config.weight_decay
     )
     
-    # 스케줄러
-    if config.scheduler == 'cosine':
-        scheduler_gen = optim.lr_scheduler.CosineAnnealingLR(optimizer_gen, T_max=config.num_epochs)
-        scheduler_disc = optim.lr_scheduler.CosineAnnealingLR(optimizer_disc, T_max=config.num_epochs)
-    elif config.scheduler == 'step':
-        scheduler_gen = optim.lr_scheduler.StepLR(optimizer_gen, step_size=config.num_epochs//3, gamma=0.1)
-        scheduler_disc = optim.lr_scheduler.StepLR(optimizer_disc, step_size=config.num_epochs//3, gamma=0.1)
-    else:
-        scheduler_gen = None
-        scheduler_disc = None
+    # 스케줄러 제거 (간소화)
+    scheduler_gen = None
+    scheduler_disc = None
     
     best_val_loss = float('inf')
     
@@ -265,6 +256,9 @@ def train_fast_srgan():
             input_img = input_img.to(device, non_blocking=True)
             target_img = target_img.to(device, non_blocking=True)
             
+            # 변수 초기화
+            disc_loss = torch.tensor(0.0, device=device)
+            
             # =================== Generator 훈련 ===================
             optimizer_gen.zero_grad()
             
@@ -274,7 +268,7 @@ def train_fast_srgan():
                     
                     # Discriminator 예측 (warmup 기간 이후)
                     if epoch >= config.warmup_epochs:
-                        disc_pred_fake = discriminator(fake_img.detach())
+                        disc_pred_fake = discriminator(fake_img)
                         gen_loss = criterion(fake_img, target_img, disc_pred_fake, is_discriminator=False)
                     else:
                         gen_loss = criterion(fake_img, target_img, is_discriminator=False)
@@ -286,7 +280,7 @@ def train_fast_srgan():
                 fake_img = generator(input_img)
                 
                 if epoch >= config.warmup_epochs:
-                    disc_pred_fake = discriminator(fake_img.detach())
+                    disc_pred_fake = discriminator(fake_img)
                     gen_loss = criterion(fake_img, target_img, disc_pred_fake, is_discriminator=False)
                 else:
                     gen_loss = criterion(fake_img, target_img, is_discriminator=False)
@@ -297,7 +291,7 @@ def train_fast_srgan():
             gen_loss_total += gen_loss.item()
             
             # =================== Discriminator 훈련 ===================
-            if epoch >= config.warmup_epochs and batch_idx % config.discriminator_update_freq == 0:
+            if epoch >= config.warmup_epochs:
                 optimizer_disc.zero_grad()
                 
                 if use_amp:
@@ -341,9 +335,10 @@ def train_fast_srgan():
                 disc_loss_total += disc_loss.item()
             
             # Progress bar 업데이트
+            disc_loss_val = disc_loss.item() if epoch >= config.warmup_epochs else 0.0
             progress_bar.set_postfix({
                 'Gen Loss': f'{gen_loss.item():.4f}',
-                'Disc Loss': f'{disc_loss.item() if epoch >= config.warmup_epochs else 0:.4f}'
+                'Disc Loss': f'{disc_loss_val:.4f}'
             })
         
         # 검증
@@ -376,15 +371,11 @@ def train_fast_srgan():
         
         # 에포크 정보 출력
         avg_gen_loss = gen_loss_total / len(train_loader)
-        avg_disc_loss = disc_loss_total / max(len(train_loader) // config.discriminator_update_freq, 1)
+        avg_disc_loss = disc_loss_total / len(train_loader) if epoch >= config.warmup_epochs else 0.0
         
         print(f"Epoch {epoch+1}: Gen={avg_gen_loss:.6f}, Disc={avg_disc_loss:.6f}")
         
-        # 스케줄러 업데이트
-        if scheduler_gen:
-            scheduler_gen.step()
-        if scheduler_disc:
-            scheduler_disc.step()
+        # 스케줄러 업데이트 (제거됨)
         
         # 주기적 모델 저장
         if epoch % config.save_interval == 0:
