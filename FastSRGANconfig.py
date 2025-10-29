@@ -30,28 +30,28 @@ class FastSRGANConfig:
     # =================================================================
     
     # Generator (생성자) 네트워크 구조
-    gen_num_features: int = 64          # 기본 특성 맵 채널 수 (메모리/속도와 성능의 균형)
-    gen_num_residual_blocks: int = 6    # 잔차 블록 개수 (실제 훈련된 모델에 맞춤)
-    use_mobile_blocks: bool = True      # MobileNet 스타일 depth-wise 컨볼루션 사용 (속도 향상)
+    gen_num_features: int = 96          # 고주파 복원을 위한 충분한 특성 맵 채널 수
+    gen_num_residual_blocks: int = 12   # 더 깊은 네트워크로 복잡한 고주파 패턴 학습
+    use_mobile_blocks: bool = False     # 고품질 복원을 위해 표준 conv 사용
     
     # Discriminator (판별자) 네트워크 구조  
     disc_num_features: int = 64         # 판별자 기본 특성 맵 채널 수
-    disc_num_layers: int = 6            # 판별자 레이어 개수 (더 가벼운 판별자)
+    disc_num_layers: int = 6            # 적절한 판별 능력을 위한 레이어 수
     
     # =================================================================
     # 훈련 하이퍼파라미터
     # =================================================================
     
     # 기본 훈련 설정
-    num_epochs: int = 1                # 전체 훈련 에포크 수
+    num_epochs: int = 5                # 전체 훈련 에포크 수
     batch_size: int = 1                 # 배치 크기 (메모리 효율성을 위해 1로 설정)
     learning_rate: float = 2e-4         # 통합 학습률 (Adam 최적화기 기준)
     weight_decay: float = 1e-4          # L2 정규화 가중치 (과적합 방지)
     
-    # 손실 함수 가중치 (각 손실의 중요도 조절)
-    adversarial_weight: float = 1e-3    # GAN 손실 가중치 (너무 크면 불안정)
+    # 손실 함수 가중치 (애니메이션 고주파 복원 최적화)
+    adversarial_weight: float = 5e-3    # GAN 손실 가중치 (고주파 디테일 강화)
     content_weight: float = 1.0         # MSE/L1 손실 가중치 (기본 복원 품질)
-    perceptual_weight: float = 0.1      # VGG 기반 지각 손실 가중치 (시각적 품질)
+    perceptual_weight: float = 0.2      # VGG 기반 지각 손실 가중치 (애니메이션 시각적 품질)
     
     # 훈련 전략 설정
     warmup_epochs: int = 5              # Generator만 먼저 훈련하는 에포크 수 (안정적인 시작)
