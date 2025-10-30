@@ -1,23 +1,28 @@
 """
-input_dir아래의 모든 영상들은 항상 yuv420영상이다.
-Y프레임 간의 유사성(내적)을 계산하여 scene을 감지하고,
-scene 단위로 Y, U, V를 추출하여 그레이스케일 무손실 압축(png)로 저장한다.
-메모리 최적화: 청크 단위 처리, 즉시 메모리 해제, 배치 처리
-ex)
-work_dir/input_scene_0001/Y/frame_00000001.png
-work_dir/input_scene_0002/Y/frame_00000001.png
+주파수 공간 기반 Scene 검출 및 Y 프레임 추출
+1. 2400개의 Y 프레임을 GPU에 로드
+2. FFT 및 shift 수행
+3. 주파수 공간에서 유사도로 Scene 검출 (240프레임 동안 새 scene 없으면 그대로 scene)
+4. Scene의 중앙 256x144 패치를 크롭하여 저주파 대역 확보
+5. 역shift 및 역FFT 수행
+6. 원본 Y 이미지(1280x720)와 저주파 이미지(256x144) 모두 PNG로 저장
+
+출력:
+work_dir/video_scene_0001/Y/frame_00000001.png (1280x720 원본)
+work_dir/video_scene_0001/x/frame_00000001.png (256x144 저주파)
 """
 
 import os
 import glob
 import ffmpeg
 import torch
+import torch.fft
 import numpy as np
 from PIL import Image
 import subprocess
 import json
 import gc
-from pathlib import Path
+from tqdm import tqdm
 
 def get_video_info(video_path):
     """ffprobe를 사용하여 비디오 정보 추출"""
@@ -25,7 +30,7 @@ def get_video_info(video_path):
         'ffprobe',
         '-v', 'error',
         '-select_streams', 'v:0',
-        '-show_entries', 'stream=width,height,nb_frames',
+        '-show_entries', 'stream=width,height,nb_frames,duration,r_frame_rate:format=duration',
         '-of', 'json',
         video_path
     ]
@@ -35,45 +40,35 @@ def get_video_info(video_path):
     width = int(stream['width'])
     height = int(stream['height'])
     nb_frames = int(stream.get('nb_frames', 0))
+    
+    if nb_frames == 0:
+        duration = float(stream.get('duration', 0))
+        if duration == 0 and 'format' in info:
+            duration = float(info['format'].get('duration', 0))
+        
+        fps_str = stream.get('r_frame_rate', '0/1')
+        if '/' in fps_str:
+            num, den = fps_str.split('/')
+            fps = float(num) / float(den) if float(den) != 0 else 0
+        else:
+            fps = float(fps_str)
+        
+        if duration > 0 and fps > 0:
+            nb_frames = int(duration * fps)
+    
     return width, height, nb_frames
 
-def extract_y_frames_for_scene_detection(video_path, device='cuda', max_frames=240, start_frame=0):
+def extract_y_frames(video_path, start_frame, max_frames):
     """
-    비디오에서 Y 채널을 추출하여 scene 감지용 텐서 생성 (임시 파일 없이)
-    
-    Args:
-        video_path: 비디오 파일 경로
-        device: 'cuda' 또는 'cpu'
-        max_frames: 최대 로드할 프레임 수 (scene 감지용, 240 권장)
-        start_frame: 시작 프레임 인덱스
-    
-    Returns:
-        y_frames: [N, H, W] tensor (GPU/CPU), N은 최대 max_frames
-        total_frames: 비디오의 실제 총 프레임 수
+    비디오에서 Y 채널을 추출하여 텐서로 반환
     """
-    # 비디오 정보 가져오기
     width, height, total_frames = get_video_info(video_path)
-    
-    if total_frames == 0:
-        # nb_frames를 얻지 못한 경우 직접 카운트
-        try:
-            probe = ffmpeg.probe(video_path)
-            video_stream = next((stream for stream in probe['streams'] if stream['codec_type'] == 'video'), None)
-            if video_stream:
-                total_frames = int(video_stream.get('nb_frames', 0))
-        except:
-            total_frames = max_frames  # 폴백
-    
     frames_to_load = min(total_frames - start_frame if total_frames > 0 else max_frames, max_frames)
     
     if frames_to_load <= 0:
-        return None, total_frames if total_frames > 0 else 0
+        return None, width, height
     
-    print(f"Loading {frames_to_load} frames starting from frame {start_frame}...")
-    
-    # ffmpeg로 Y 채널을 numpy array로 직접 읽기
     try:
-        # select 필터 사용: gte로 시작점 지정, 프레임 수 제한은 vframes로
         out, _ = (
             ffmpeg
             .input(video_path)
@@ -85,221 +80,127 @@ def extract_y_frames_for_scene_detection(video_path, device='cuda', max_frames=2
         )
     except ffmpeg.Error as e:
         print(f"FFmpeg error: {e.stderr.decode() if e.stderr else 'Unknown error'}")
-        raise
+        return None, width, height
     
-    # 프레임 크기 계산 (Y 채널만)
     frame_size = width * height
     num_frames = len(out) // frame_size
     
     if num_frames == 0:
-        return None, total_frames if total_frames > 0 else 0
+        return None, width, height
     
-    # numpy array로 변환 (copy()로 writable하게 만들기)
     frames_np = np.frombuffer(out, np.uint8).reshape((num_frames, height, width)).copy()
-    
-    # torch tensor로 변환
-    frames_tensor = torch.from_numpy(frames_np).float().to(device)
+    frames_tensor = torch.from_numpy(frames_np).float()
     
     del frames_np, out
     gc.collect()
     
-    print(f"Loaded {num_frames} frames to {device}")
-    
-    return frames_tensor, total_frames if total_frames > 0 else num_frames
+    return frames_tensor, width, height
 
-def detect_scene_changes(y_frames, threshold=0.85, min_scene_frames=8, hard_threshold=0.3):
+def detect_scenes_in_frequency_space(fft_shifted_frames, threshold, min_scene_frames):
     """
-    Y 프레임 간의 정규화된 내적을 계산하여 scene 변화 감지
+    주파수 공간에서 프레임 간 차이를 계산하여 scene 변화 감지
     
     Args:
-        y_frames: [N, H, W] tensor
-        threshold: 유사도 임계값 (이보다 낮으면 scene 변화로 감지)
-        min_scene_frames: 최소 scene 프레임 수 (기본 8)
-        hard_threshold: 강제 scene 분리 임계값 (이보다 낮으면 무조건 분리, 기본 0.3)
+        fft_shifted_frames: [N, H, W] complex tensor (FFT shifted)
+        threshold: 차이 임계값 (높을수록 민감) - 정규화된 차이 비율
+        min_scene_frames: 최소 scene 프레임 수 (240)
     
     Returns:
         scene_boundaries: scene 시작 프레임 인덱스 리스트
-        similarities: 연속 프레임 간 유사도 배열
     """
-    n_frames = y_frames.shape[0]
+    n_frames = fft_shifted_frames.shape[0]
     
     if n_frames <= 1:
-        return [0], []
+        return [0]
     
-    device = y_frames.device
+    device = fft_shifted_frames.device
     
-    # 연속된 프레임 간의 코사인 유사도 계산
-    curr_frames = y_frames[:-1].reshape(n_frames - 1, -1)
-    next_frames = y_frames[1:].reshape(n_frames - 1, -1)
+    # 주파수 공간에서 magnitude 계산
+    magnitude = torch.abs(fft_shifted_frames)  # [N, H, W]
     
-    # 정규화
-    curr_norm = torch.nn.functional.normalize(curr_frames, p=2, dim=1)
-    next_norm = torch.nn.functional.normalize(next_frames, p=2, dim=1)
+    # 저주파 영역만 사용 (중앙 영역 - 더 안정적인 scene 변화 감지)
+    h, w = magnitude.shape[1], magnitude.shape[2]
+    center_h, center_w = h // 2, w // 2
+    crop_h, crop_w = h // 4, w // 4  # 중앙 25% 영역
     
-    # 유사도 계산
-    similarities = torch.sum(curr_norm * next_norm, dim=1).cpu().numpy()
+    low_freq = magnitude[:, 
+                        center_h - crop_h:center_h + crop_h,
+                        center_w - crop_w:center_w + crop_w]
     
-    # 메모리 해제
-    del curr_frames, next_frames, curr_norm, next_norm
+    # 연속된 프레임 간의 정규화된 차이 계산
+    curr_frames = low_freq[:-1].reshape(n_frames - 1, -1)
+    next_frames = low_freq[1:].reshape(n_frames - 1, -1)
+    
+    # L2 거리 계산 후 정규화
+    diff = torch.norm(curr_frames - next_frames, p=2, dim=1)
+    curr_norm = torch.norm(curr_frames, p=2, dim=1)
+    
+    # 상대적 변화율 계산 (0~1 사이 값)
+    relative_changes = (diff / (curr_norm + 1e-8)).cpu().numpy()
+    
+    del curr_frames, next_frames, diff, curr_norm, magnitude, low_freq
     gc.collect()
     if device.type == 'cuda':
         torch.cuda.empty_cache()
     
-    # scene 변화 감지 (2단계 임계값)
-    # hard_threshold 이하: 무조건 scene 분리
-    # threshold 이하: 최소 프레임 조건 확인
-    hard_changes = (similarities < hard_threshold)
-    soft_changes = (similarities < threshold)
-    
-    # scene 시작 인덱스 구성
+    # Scene 변화 감지
     scene_boundaries = [0]
     last_boundary = 0
     
-    for i in range(len(similarities)):
-        if hard_changes[i]:
-            # 강제 분리 (유사도가 매우 낮음)
-            scene_boundaries.append(i + 1)
-            last_boundary = i + 1
-            print(f"  Hard scene change at frame {i+1} (similarity: {similarities[i]:.3f})")
-        elif soft_changes[i]:
-            # 일반 분리 (최소 프레임 수 확인)
+    # 변화율이 threshold보다 크면 scene 변화로 감지
+    for i in range(len(relative_changes)):
+        if relative_changes[i] > threshold:
             frames_since_last = (i + 1) - last_boundary
             if frames_since_last >= min_scene_frames:
                 scene_boundaries.append(i + 1)
                 last_boundary = i + 1
-                print(f"  Scene change at frame {i+1} (similarity: {similarities[i]:.3f}, length: {frames_since_last})")
-            else:
-                print(f"  Skipped scene change at frame {i+1} (similarity: {similarities[i]:.3f}, too short: {frames_since_last} < {min_scene_frames})")
     
-    return scene_boundaries, similarities
+    # 디버그 정보
+    if len(relative_changes) > 0:
+        print(f"    Change rate: min={relative_changes.min():.4f}, max={relative_changes.max():.4f}, "
+              f"mean={relative_changes.mean():.4f}, std={relative_changes.std():.4f}")
+        print(f"    Threshold: {threshold:.4f}, Changes above threshold: {(relative_changes > threshold).sum()}")
+    
+    return scene_boundaries
 
-def save_y_frames_as_png(y_frames_tensor, output_dir, channel='Y'):
+def save_frames_as_png(frames_tensor, output_dir, subdir_name):
     """
-    Y 프레임 텐서를 PNG 파일로 저장
+    프레임 텐서를 PNG 파일로 저장
     
     Args:
-        y_frames_tensor: [N, H, W] CPU tensor
+        frames_tensor: [N, H, W] tensor
         output_dir: 출력 디렉토리
-        channel: 채널 이름 ('Y', 'U', 'V')
+        subdir_name: 서브디렉토리 이름 ('Y' 또는 'x')
     """
-    channel_dir = os.path.join(output_dir, channel)
+    channel_dir = os.path.join(output_dir, subdir_name)
     os.makedirs(channel_dir, exist_ok=True)
     
-    num_frames = y_frames_tensor.shape[0]
+    num_frames = frames_tensor.shape[0]
     
     for i in range(num_frames):
-        frame_np = y_frames_tensor[i].numpy().astype(np.uint8)
-        img = Image.fromarray(frame_np)
+        frame_np = frames_tensor[i].numpy().astype(np.uint8)
+        img = Image.fromarray(frame_np, mode='L')
         
         frame_path = os.path.join(channel_dir, f"frame_{i+1:08d}.png")
         img.save(frame_path, compress_level=1)
-    
-    print(f"  ✓ Saved {num_frames} {channel} frames to {channel_dir}")
 
-def extract_uv_frames(video_path, start_frame, end_frame, output_dir, width, height):
+def process_video_frequency_based(video_path, output_dir, video_name, device, 
+                                  batch_size, similarity_threshold, min_scene_frames,
+                                  crop_width, crop_height):
     """
-    특정 구간의 U, V 채널을 추출하여 PNG로 저장
-    
-    Args:
-        video_path: 비디오 파일 경로
-        start_frame: 시작 프레임 (0-based)
-        end_frame: 끝 프레임 (exclusive)
-        output_dir: 출력 디렉토리
-        width: 비디오 너비
-        height: 비디오 높이
-    """
-    num_frames = end_frame - start_frame
-    
-    print(f"  Extracting U/V channels for {num_frames} frames (frame {start_frame} to {end_frame-1})...")
-    
-    # U 채널 추출
-    print(f"  Extracting U channel...")
-    try:
-        out_u, _ = (
-            ffmpeg
-            .input(video_path)
-            .filter('select', f'gte(n,{start_frame})')
-            .filter('setpts', 'N/(FR*TB)')
-            .filter('extractplanes', 'u')
-            .output('pipe:', format='rawvideo', pix_fmt='gray', vframes=num_frames)
-            .run(capture_stdout=True, capture_stderr=True, quiet=True)
-        )
-        
-        # U 채널 저장 (YUV420이므로 크기가 절반)
-        u_width = width // 2
-        u_height = height // 2
-        frame_size_u = u_width * u_height
-        u_frames = np.frombuffer(out_u, np.uint8).reshape((-1, u_height, u_width)).copy()
-        
-        u_dir = os.path.join(output_dir, 'U')
-        os.makedirs(u_dir, exist_ok=True)
-        
-        for i in range(u_frames.shape[0]):
-            img = Image.fromarray(u_frames[i])
-            img.save(os.path.join(u_dir, f"frame_{i+1:08d}.png"), compress_level=1)
-        
-        print(f"  ✓ Saved {u_frames.shape[0]} U frames")
-        del out_u, u_frames
-        
-    except Exception as e:
-        print(f"  ⚠ Error extracting U channel: {e}")
-    
-    # V 채널 추출
-    print(f"  Extracting V channel...")
-    try:
-        out_v, _ = (
-            ffmpeg
-            .input(video_path)
-            .filter('select', f'gte(n,{start_frame})')
-            .filter('setpts', 'N/(FR*TB)')
-            .filter('extractplanes', 'v')
-            .output('pipe:', format='rawvideo', pix_fmt='gray', vframes=num_frames)
-            .run(capture_stdout=True, capture_stderr=True, quiet=True)
-        )
-        
-        # V 채널 저장
-        v_frames = np.frombuffer(out_v, np.uint8).reshape((-1, u_height, u_width)).copy()
-        
-        v_dir = os.path.join(output_dir, 'V')
-        os.makedirs(v_dir, exist_ok=True)
-        
-        for i in range(v_frames.shape[0]):
-            img = Image.fromarray(v_frames[i])
-            img.save(os.path.join(v_dir, f"frame_{i+1:08d}.png"), compress_level=1)
-        
-        print(f"  ✓ Saved {v_frames.shape[0]} V frames")
-        del out_v, v_frames
-        
-    except Exception as e:
-        print(f"  ⚠ Error extracting V channel: {e}")
-    
-    gc.collect()
-
-def process_video_with_chunked_detection(video_path, output_dir, video_name, device='cuda', 
-                                        chunk_size=240, similarity_threshold=0.85, 
-                                        min_scene_frames=8, hard_threshold=0.3):
-    """
-    240프레임씩 Y 채널을 로드하여 scene 감지 후, 감지된 구간의 Y/U/V를 추출하는 통합 함수
-    
-    처리 순서:
-    1. 240개의 Y프레임 추출 → GPU 이동
-    2. GPU에서 scene 검사 (예: 51번째에서 감지)
-    3. 1-50 프레임을 GPU→CPU 이동하여 scene1에 Y 저장
-    4. 해당 구간의 U/V도 추출하여 저장
-    5. 51-240 프레임으로 다시 검사
-    6. 241-480 프레임 로드하여 반복
+    주파수 공간 기반 Scene 검출 및 Y 프레임 추출
     
     Args:
         video_path: 비디오 파일 경로
         output_dir: 출력 디렉토리
         video_name: 비디오 이름
         device: 처리 디바이스
-        chunk_size: 청크 크기 (240)
-        similarity_threshold: scene 변화 감지 임계값
-        min_scene_frames: 최소 scene 프레임 수 (기본 8)
-        hard_threshold: 강제 scene 분리 임계값 (기본 0.3)
+        batch_size: 한 번에 처리할 프레임 수 (2400)
+        similarity_threshold: scene 감지 임계값
+        min_scene_frames: 최소 scene 프레임 수 (240)
+        crop_width: 저주파 크롭 너비 (256)
+        crop_height: 저주파 크롭 높이 (144)
     """
-    # 총 프레임 수 확인
     width, height, total_frames = get_video_info(video_path)
     print(f"Video info: {width}x{height}, {total_frames} frames")
     
@@ -307,227 +208,124 @@ def process_video_with_chunked_detection(video_path, output_dir, video_name, dev
     scene_idx = 1
     
     while current_frame < total_frames:
-        chunk_end = min(current_frame + chunk_size, total_frames)
-        chunk_length = chunk_end - current_frame
+        print(f"\nProcessing frames {current_frame} to {min(current_frame + batch_size, total_frames)}...")
         
-        print(f"\n{'='*60}")
-        print(f"Processing chunk: frames {current_frame}-{chunk_end-1} ({chunk_length} frames)")
-        print(f"{'='*60}")
+        # 1. 2400개의 Y 프레임을 GPU에 로드
+        y_frames, _, _ = extract_y_frames(video_path, current_frame, batch_size)
         
-        try:
-            # 1. 240개의 Y프레임 추출
-            print(f"Step 1: Extracting {chunk_length} Y frames...")
-            y_frames, _ = extract_y_frames_for_scene_detection(
-                video_path, device='cpu', max_frames=chunk_length, start_frame=current_frame
-            )
+        if y_frames is None or y_frames.shape[0] == 0:
+            break
+        
+        y_frames = y_frames.to(device)
+        num_frames = y_frames.shape[0]
+        
+        # 2. FFT 및 shift 수행
+        print(f"  Performing FFT on {num_frames} frames...")
+        fft_frames = torch.fft.fft2(y_frames)
+        fft_shifted = torch.fft.fftshift(fft_frames, dim=(-2, -1))
+        
+        # 3. 주파수 공간에서 Scene 검출
+        print(f"  Detecting scenes in frequency space...")
+        scene_boundaries = detect_scenes_in_frequency_space(
+            fft_shifted, 
+            threshold=similarity_threshold,
+            min_scene_frames=min_scene_frames
+        )
+        
+        print(f"  Found {len(scene_boundaries)} scene(s) in this batch")
+        
+        # 4 & 5 & 6. 각 scene 처리
+        for i in range(len(scene_boundaries)):
+            scene_start_in_batch = scene_boundaries[i]
             
-            if y_frames is None or y_frames.shape[0] == 0:
-                print(f"Warning: No frames in chunk starting at {current_frame}")
-                break
-            
-            # 2. GPU로 이동
-            print(f"Step 2: Moving {y_frames.shape[0]} frames to {device}...")
-            y_frames = y_frames.to(device)
-            
-            # 3. GPU에서 Scene 검사
-            print(f"Step 3: Detecting scenes on {device}...")
-            scene_boundaries, _ = detect_scene_changes(
-                y_frames, 
-                threshold=similarity_threshold,
-                min_scene_frames=min_scene_frames,
-                hard_threshold=hard_threshold
-            )
-            
-            print(f"Detected boundaries within chunk: {scene_boundaries}")
-            
-            # 4-7. 감지된 scene별로 처리
-            if len(scene_boundaries) == 1:
-                # scene 변화가 없음 → 전체 240프레임이 하나의 scene
-                print(f"No scene change detected - entire chunk is scene {scene_idx}")
-                
-                scene_start_in_chunk = 0
-                scene_end_in_chunk = y_frames.shape[0]
-                global_start = current_frame
-                global_end = current_frame + scene_end_in_chunk
-                
-                # Y 프레임 저장
-                scene_name = f"{video_name}_scene_{scene_idx:04d}"
-                output_scene_dir = os.path.join(output_dir, scene_name)
-                print(f"Saving scene {scene_idx}: frames {global_start}-{global_end-1}")
-                
-                # 5. GPU → CPU 이동
-                y_frames_cpu = y_frames[scene_start_in_chunk:scene_end_in_chunk].cpu()
-                
-                # 6. Y 프레임 저장
-                save_y_frames_as_png(y_frames_cpu, output_scene_dir, 'Y')
-                del y_frames_cpu
-                
-                # 7. U, V 프레임 추출 및 저장
-                extract_uv_frames(video_path, global_start, global_end, output_scene_dir, width, height)
-                
-                scene_idx += 1
-                
+            if i + 1 < len(scene_boundaries):
+                scene_end_in_batch = scene_boundaries[i + 1]
             else:
-                # scene 변화가 감지됨 → 여러 scene으로 분할
-                for i in range(len(scene_boundaries)):
-                    scene_start_in_chunk = scene_boundaries[i]
-                    
-                    # 다음 boundary까지가 현재 scene
-                    if i + 1 < len(scene_boundaries):
-                        scene_end_in_chunk = scene_boundaries[i + 1]
-                    else:
-                        scene_end_in_chunk = y_frames.shape[0]
-                    
-                    global_start = current_frame + scene_start_in_chunk
-                    global_end = current_frame + scene_end_in_chunk
-                    
-                    scene_name = f"{video_name}_scene_{scene_idx:04d}"
-                    output_scene_dir = os.path.join(output_dir, scene_name)
-                    
-                    print(f"\nProcessing detected scene {scene_idx}: frames {global_start}-{global_end-1} ({global_end - global_start} frames)")
-                    
-                    # 5. GPU → CPU 이동
-                    y_frames_cpu = y_frames[scene_start_in_chunk:scene_end_in_chunk].cpu()
-                    
-                    # 6. Y 프레임 저장
-                    save_y_frames_as_png(y_frames_cpu, output_scene_dir, 'Y')
-                    del y_frames_cpu
-                    gc.collect()
-                    
-                    # 7. U, V 프레임 추출 및 저장
-                    extract_uv_frames(video_path, global_start, global_end, output_scene_dir, width, height)
-                    
-                    scene_idx += 1
+                scene_end_in_batch = num_frames
             
-            # 메모리 해제
-            del y_frames
+            global_start = current_frame + scene_start_in_batch
+            global_end = current_frame + scene_end_in_batch
+            
+            scene_name = f"{video_name}_scene_{scene_idx:04d}"
+            output_scene_dir = os.path.join(output_dir, scene_name)
+            
+            progress = (global_end / total_frames) * 100
+            print(f"  Scene {scene_idx}: {global_end - global_start} frames | Progress: {progress:.1f}%")
+            
+            # 이 scene의 FFT 데이터 추출
+            scene_fft = fft_shifted[scene_start_in_batch:scene_end_in_batch]
+            
+            # 5a. 원본 크기 역변환 (1280x720 원본 Y 이미지)
+            scene_fft_full = torch.fft.ifftshift(scene_fft, dim=(-2, -1))
+            scene_y_full = torch.fft.ifft2(scene_fft_full)
+            scene_y_full = torch.real(scene_y_full).clamp(0, 255)
+            
+            # CPU로 이동하여 저장
+            scene_y_full_cpu = scene_y_full.cpu()
+            save_frames_as_png(scene_y_full_cpu, output_scene_dir, 'Y')
+            del scene_y_full, scene_y_full_cpu
+            
+            # 4 & 5b. 저주파 이미지 생성 (올바른 방법)
+            # 중앙 외 영역을 0으로 마스킹하여 저주파만 남김
+            center_y, center_x = height // 2, width // 2
+            mask_height = crop_height * 2  # 중앙에서 크롭할 영역의 2배
+            mask_width = crop_width * 2
+            start_y = center_y - mask_height // 2
+            end_y = start_y + mask_height
+            start_x = center_x - mask_width // 2
+            end_x = start_x + mask_width
+            
+            # 저주파 마스크 생성
+            scene_fft_lowfreq = torch.zeros_like(scene_fft)
+            scene_fft_lowfreq[:, start_y:end_y, start_x:end_x] = scene_fft[:, start_y:end_y, start_x:end_x]
+            
+            # IFFT로 공간 영역으로 변환
+            scene_fft_lowfreq_ishifted = torch.fft.ifftshift(scene_fft_lowfreq, dim=(-2, -1))
+            scene_x_fullsize = torch.fft.ifft2(scene_fft_lowfreq_ishifted)
+            scene_x_fullsize = torch.real(scene_x_fullsize).clamp(0, 255)
+            
+            # 256x144로 다운샘플링 (보간)
+            scene_x_low = torch.nn.functional.interpolate(
+                scene_x_fullsize.unsqueeze(1),  # [N, 1, 720, 1280]
+                size=(crop_height, crop_width),
+                mode='bilinear',
+                align_corners=False
+            ).squeeze(1)  # [N, 144, 256]
+            
+            # CPU로 이동하여 저장
+            scene_x_low_cpu = scene_x_low.cpu()
+            save_frames_as_png(scene_x_low_cpu, output_scene_dir, 'x')
+            del scene_x_fullsize, scene_x_low, scene_x_low_cpu, scene_fft_lowfreq, scene_fft_lowfreq_ishifted
+            
+            scene_idx += 1
             gc.collect()
             if device == 'cuda':
                 torch.cuda.empty_cache()
-            
-        except Exception as e:
-            print(f"Error processing chunk at frame {current_frame}: {e}")
-            import traceback
-            traceback.print_exc()
-            break
         
-        # 8. 다음 청크로 이동 (241번째 프레임부터)
-        current_frame = chunk_end
-    
-    print(f"\n{'='*60}")
-    print(f"✓ Completed processing: {scene_idx - 1} scenes extracted")
-    print(f"{'='*60}")
-
-def extract_scene_yuv(video_path, scene_start, scene_end, output_dir):
-    """
-    특정 scene 구간의 Y, U, V 채널 추출 (프로세스 안전 처리)
-    """
-    y_dir = os.path.join(output_dir, 'Y')
-    u_dir = os.path.join(output_dir, 'U')
-    v_dir = os.path.join(output_dir, 'V')
-    
-    os.makedirs(y_dir, exist_ok=True)
-    os.makedirs(u_dir, exist_ok=True)
-    os.makedirs(v_dir, exist_ok=True)
-    
-    # Y 채널 추출
-    try:
-        process = (
-            ffmpeg
-            .input(video_path)
-            .filter('select', f'gte(n,{scene_start})*lte(n,{scene_end-1})')
-            .filter('setpts', 'N/FRAME_RATE/TB')
-            .filter('extractplanes', 'y')
-            .output(os.path.join(y_dir, 'frame_%08d.png'), 
-                    pix_fmt='gray', 
-                    compression_level=0,
-                    start_number=1,
-                    vsync='0')
-            .overwrite_output()
-            .run_async(pipe_stdout=True, pipe_stderr=True)
-        )
-        process.communicate()
-        process.wait()
-    finally:
-        if 'process' in locals() and process.poll() is None:
-            process.kill()
-    
-    # U 채널 추출
-    try:
-        process = (
-            ffmpeg
-            .input(video_path)
-            .filter('select', f'gte(n,{scene_start})*lte(n,{scene_end-1})')
-            .filter('setpts', 'N/FRAME_RATE/TB')
-            .filter('extractplanes', 'u')
-            .output(os.path.join(u_dir, 'frame_%08d.png'), 
-                    pix_fmt='gray', 
-                    compression_level=0,
-                    start_number=1,
-                    vsync='0')
-            .overwrite_output()
-            .run_async(pipe_stdout=True, pipe_stderr=True)
-        )
-        process.communicate()
-        process.wait()
-    finally:
-        if 'process' in locals() and process.poll() is None:
-            process.kill()
-    
-    # V 채널 추출
-    try:
-        process = (
-            ffmpeg
-            .input(video_path)
-            .filter('select', f'gte(n,{scene_start})*lte(n,{scene_end-1})')
-            .filter('setpts', 'N/FRAME_RATE/TB')
-            .filter('extractplanes', 'v')
-            .output(os.path.join(v_dir, 'frame_%08d.png'), 
-                    pix_fmt='gray', 
-                    compression_level=0,
-                    start_number=1,
-                    vsync='0')
-            .overwrite_output()
-            .run_async(pipe_stdout=True, pipe_stderr=True)
-        )
-        process.communicate()
-        process.wait()
-    finally:
-        if 'process' in locals() and process.poll() is None:
-            process.kill()
+        # 메모리 해제
+        del y_frames, fft_frames, fft_shifted
         gc.collect()
+        if device == 'cuda':
+            torch.cuda.empty_cache()
+        
+        # 다음 배치로 이동
+        current_frame += num_frames
+    
+    print(f"\n✓ Total {scene_idx - 1} scenes extracted")
 
-def YUV420_extractor(input_dir='videos', output_dir='work_dir', similarity_threshold=0.85, 
-                     min_scene_frames=8, hard_threshold=0.3, force_cpu=False):
+def YUV420_extractor(input_dir, output_dir, similarity_threshold, 
+                     min_scene_frames, device, batch_size, 
+                     crop_width, crop_height):
     """
-    YUV420 비디오에서 Y 프레임 유사성 기반으로 scene을 감지하고,
-    scene별로 Y, U, V 채널을 추출하여 PNG로 저장
-    
-    Args:
-        input_dir: 입력 비디오 디렉토리
-        output_dir: 출력 디렉토리
-        similarity_threshold: scene 감지 임계값 (낮을수록 민감)
-        min_scene_frames: 최소 scene 프레임 수 (기본 8)
-        hard_threshold: 강제 scene 분리 임계값 (기본 0.3)
-        force_cpu: True이면 GPU 사용 안함 (메모리 부족 시)
+    주파수 공간 기반 Y 프레임 추출 및 Scene 검출
     """
-    if force_cpu:
-        device = 'cpu'
-        print("Forced CPU mode")
-    else:
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    
     print(f"Using device: {device}")
     
     if device == 'cuda':
-        # GPU 메모리 상태 출력
         gpu_mem_total = torch.cuda.get_device_properties(0).total_memory / 1024**3
         gpu_mem_allocated = torch.cuda.memory_allocated(0) / 1024**3
         print(f"GPU memory: {gpu_mem_allocated:.2f}GB / {gpu_mem_total:.2f}GB")
-        
-        # GPU 메모리 초기화
         torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
     
     # 입력 디렉토리에서 모든 비디오 파일 찾기
     video_extensions = ['*.mp4', '*.avi', '*.mov', '*.mkv', '*.wmv', '*.flv']
@@ -540,46 +338,35 @@ def YUV420_extractor(input_dir='videos', output_dir='work_dir', similarity_thres
         print(f"No video files found in {input_dir}")
         return
     
-    for video_idx, video_path in enumerate(video_files):
+    print(f"Found {len(video_files)} video(s)")
+    
+    for video_idx, video_path in enumerate(video_files, 1):
         video_name = os.path.splitext(os.path.basename(video_path))[0]
         print(f"\n{'='*60}")
-        print(f"Processing video {video_idx+1}/{len(video_files)}: {video_name}")
+        print(f"[{video_idx}/{len(video_files)}] Processing: {video_name}")
         print(f"{'='*60}")
         
         try:
-            # 새로운 통합 처리 함수 호출
-            process_video_with_chunked_detection(
+            process_video_frequency_based(
                 video_path=video_path,
                 output_dir=output_dir,
                 video_name=video_name,
                 device=device,
-                chunk_size=240,
+                batch_size=batch_size,
                 similarity_threshold=similarity_threshold,
                 min_scene_frames=min_scene_frames,
-                hard_threshold=hard_threshold
+                crop_width=crop_width,
+                crop_height=crop_height
             )
             
         except RuntimeError as e:
             if 'out of memory' in str(e).lower() and device == 'cuda':
-                print(f"⚠ GPU out of memory! Retrying with CPU...")
+                print(f"⚠ GPU out of memory! Skipping this video...")
                 torch.cuda.empty_cache()
-                process_video_with_chunked_detection(
-                    video_path=video_path,
-                    output_dir=output_dir,
-                    video_name=video_name,
-                    device='cpu',
-                    chunk_size=240,
-                    similarity_threshold=similarity_threshold,
-                    min_scene_frames=min_scene_frames,
-                    hard_threshold=hard_threshold
-                )
             else:
-                raise
-                
-        except Exception as e:
-            print(f"Error processing video {video_path}: {e}")
-            import traceback
-            traceback.print_exc()
+                print(f"Error processing video: {e}")
+                import traceback
+                traceback.print_exc()
             continue
     
     # 최종 메모리 정리
@@ -589,36 +376,29 @@ def YUV420_extractor(input_dir='videos', output_dir='work_dir', similarity_thres
         torch.cuda.synchronize()
     
     print(f"\n{'='*60}")
-    print(f"All videos processed successfully!")
+    print(f"All videos processed!")
     print(f"{'='*60}")
 
 if __name__ == "__main__":
-    import argparse
-    
-    parser = argparse.ArgumentParser(description='YUV420 Video Scene Extractor')
-    parser.add_argument('--input_dir', default='videos', help='Input video directory')
-    parser.add_argument('--output_dir', default='work_dir', help='Output directory')
-    parser.add_argument('--threshold', type=float, default=0.9, help='Scene detection threshold (soft)')
-    parser.add_argument('--hard_threshold', type=float, default=0.45, help='Hard scene detection threshold (force split)')
-    parser.add_argument('--min_frames', type=int, default=8, help='Minimum frames per scene')
-    parser.add_argument('--cpu', action='store_true', help='Force CPU mode (if GPU memory is limited)')
-    
-    args = parser.parse_args()
+    from config import INPUT_DIR, WORK_DIR, YUV420ExtractorConfig
     
     print("="*60)
-    print("YUV420 Scene Extractor")
+    print("Frequency-based Scene Extractor (Y frames only)")
     print("="*60)
-    print("Processing 240 frames at a time")
-    print("Max scene length: 240 frames")
-    print(f"Min scene length: {args.min_frames} frames (except hard threshold)")
-    print(f"Soft threshold: {args.threshold}, Hard threshold: {args.hard_threshold}")
+    print(f"Device: {YUV420ExtractorConfig.DEVICE}")
+    print(f"Batch size: {YUV420ExtractorConfig.BATCH_SIZE} frames")
+    print(f"Min scene length: {YUV420ExtractorConfig.MIN_SCENE_FRAMES} frames")
+    print(f"Similarity threshold: {YUV420ExtractorConfig.SIMILARITY_THRESHOLD}")
+    print(f"Low-freq crop size: {YUV420ExtractorConfig.CROP_WIDTH}x{YUV420ExtractorConfig.CROP_HEIGHT}")
     print("="*60)
     
     YUV420_extractor(
-        input_dir=args.input_dir,
-        output_dir=args.output_dir,
-        similarity_threshold=args.threshold,
-        min_scene_frames=args.min_frames,
-        hard_threshold=args.hard_threshold,
-        force_cpu=args.cpu
+        input_dir=INPUT_DIR,
+        output_dir=WORK_DIR,
+        similarity_threshold=YUV420ExtractorConfig.SIMILARITY_THRESHOLD,
+        min_scene_frames=YUV420ExtractorConfig.MIN_SCENE_FRAMES,
+        device=YUV420ExtractorConfig.DEVICE,
+        batch_size=YUV420ExtractorConfig.BATCH_SIZE,
+        crop_width=YUV420ExtractorConfig.CROP_WIDTH,
+        crop_height=YUV420ExtractorConfig.CROP_HEIGHT
     )
