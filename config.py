@@ -25,7 +25,7 @@ class YUV420ExtractorConfig:
     MIN_SCENE_FRAMES = 8            # 최소 scene 프레임 수 (8프레임 동안 새 scene 없으면 그대로 scene)
     
     # 처리 설정
-    BATCH_SIZE = 2400               # 한 번에 처리할 프레임 수 (GPU 메모리)
+    BATCH_SIZE = 240               # 한 번에 처리할 프레임 수 (GPU 메모리)
     CROP_WIDTH = 256                # 저주파 대역 크롭 너비
     CROP_HEIGHT = 144               # 저주파 대역 크롭 높이
     
@@ -42,7 +42,7 @@ class TrainConfig:
     SEED = 42                       # 재현성을 위한 시드 값
     LOG_INTERVAL = 1               # 학습 로그 출력 주기 (step)
     CHECKPOINT_INTERVAL = 1         # 에포크 단위 체크포인트 저장 주기
-    EPOCHS = 50                     # 총 학습 에포크 수
+    EPOCHS = 10                     # 총 학습 에포크 수
     BATCH_SIZE = 1                  # 학습 배치 크기
     NUM_WORKERS = 4                 # DataLoader worker 수
     PIN_MEMORY = True               # DataLoader pin_memory 사용 여부
