@@ -597,6 +597,10 @@ def train(cfg: TrainConfig) -> None:
                     adv_loss * 0.5 +                # adversarial 약간 감소
                     pixel_loss * cfg.LAMBDA_L1 +
                     lowfreq_loss * cfg.LAMBDA_FREQ +
+                    edge_loss * 8.0 +              # 10→20 (에지 강조)
+                    grad_loss * 4.0                # 5→10 (샤프니스 강조)
+                )
+            
             scaler_g.scale(loss_g).backward()
             scaler_g.step(optimizer_g)
             scaler_g.update()
@@ -611,9 +615,12 @@ def train(cfg: TrainConfig) -> None:
             global_step += 1
 
             if global_step % cfg.LOG_INTERVAL == 0:
-
-            global_step += 1
-
+                progress.set_postfix({
+                    'G': f'{loss_g.item():.2f}',
+                    'D': f'{loss_d.item():.3f}',
+                    'L1': f'{pixel_loss.item():.4f}',
+                    'LF': f'{lowfreq_loss.item():.4f}',
+                    'E': f'{edge_loss.item():.4f}',
                 })
 
         # Train PSNR 계산
@@ -629,13 +636,6 @@ def train(cfg: TrainConfig) -> None:
         print(f'\n[Epoch {epoch}]')
         print(f'  Train PSNR: {train_psnr:.2f}dB')
         print(f'  Val - L1: {val_metrics["l1"]:.6f} | '
-              f'LowFreq: {val_metrics["lowfreq"]:.6f} | '
-              f'Edge: {val_metrics["edge"]:.6f} | '
-              f'PSNR: {val_metrics["psnr"]:.2f}dB\n')
-        if epoch % cfg.CHECKPOINT_INTERVAL == 0:
-            save_checkpoint(generator, discriminator, optimizer_g, optimizer_d, epoch, cfg, val_metrics)
-
-        print(f'\n[Epoch {epoch}] Val - L1: {val_metrics["l1"]:.6f} | '
               f'LowFreq: {val_metrics["lowfreq"]:.6f} | '
               f'Edge: {val_metrics["edge"]:.6f} | '
               f'PSNR: {val_metrics["psnr"]:.2f}dB\n')
