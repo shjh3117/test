@@ -25,7 +25,7 @@ class YUV420ExtractorConfig:
     MIN_SCENE_FRAMES = 8            # 최소 scene 프레임 수 (8프레임 동안 새 scene 없으면 그대로 scene)
     
     # 처리 설정
-    BATCH_SIZE = 240               # 한 번에 처리할 프레임 수 (GPU 메모리)
+    BATCH_SIZE = 480               # 한 번에 처리할 프레임 수 (GPU 메모리)
     CROP_WIDTH = 256                # 저주파 대역 크롭 너비
     CROP_HEIGHT = 144               # 저주파 대역 크롭 높이
     
@@ -46,14 +46,14 @@ class TrainConfig:
     BATCH_SIZE = 1                  # 학습 배치 크기
     NUM_WORKERS = 4                 # DataLoader worker 수
     PIN_MEMORY = True               # DataLoader pin_memory 사용 여부
-    BASE_CHANNELS = 64              # Generator/Discriminator 기본 채널 수
-    NUM_RESIDUAL_BLOCKS = 8         # Generator 내 residual block 수
-    LR_GENERATOR = 2e-4             # Generator 학습률
+    BASE_CHANNELS = 96              # Generator/Discriminator 기본 채널 수
+    NUM_RESIDUAL_BLOCKS = 16        # Generator 내 residual block 수 (8→16 증가)
+    LR_GENERATOR = 2e-4             # Generator
     LR_DISCRIMINATOR = 2e-4         # Discriminator 학습률
     BETA1 = 0.5                     # Adam beta1
     BETA2 = 0.999                   # Adam beta2
-    LAMBDA_L1 = 100.0               # L1 재구성 손실 가중치
-    LAMBDA_FREQ = 50.0              # 저주파 보존 손실 가중치 (LowPass Filter 기반)
+    LAMBDA_L1 = 16                   # L1 재구성 손실 가중치
+    LAMBDA_FREQ = 4                  # 저주파 보존 손실 가중치
     LAMBDA_VGG = 0.0                # VGG perceptual loss 가중치 (미사용시 0)
     SCALE_FACTOR = 5                # 업스케일 비율 (1280/256)
     DEVICE = _DEVICE                # 학습 디바이스

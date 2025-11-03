@@ -60,7 +60,10 @@ class SceneFrameDataset(Dataset):
             if not os.path.isdir(x_dir) or not os.path.isdir(y_dir):
                 continue
 
-            for x_path in sorted(glob(os.path.join(x_dir, '*.png'))):
+            # 각 scene의 첫 번째 이미지만 선택
+            x_files = sorted(glob(os.path.join(x_dir, '*.png')))
+            if x_files:
+                x_path = x_files[0]  # 첫 번째 프레임만
                 frame_name = os.path.basename(x_path)
                 y_path = os.path.join(y_dir, frame_name)
                 if os.path.isfile(y_path):
@@ -179,46 +182,45 @@ class EdgeDetector(nn.Module):
 
 class Generator(nn.Module):
     """
-    저주파 이미지를 입력으로 받아 고해상도 이미지 생성
-    핵심: 입력 저주파를 직접 보존하고, 고주파만 생성하여 더함
+    저주파 이미지를 점진적으로 업샘플링하며 고주파 생성
+    글의 방법: 256×144 → (2×) → 512×288 → (2×) → 1024×576 → (보간) → 1280×720
     """
     def __init__(self, base_channels: int = 64, num_residual_blocks: int = 16, scale_factor: int = 5) -> None:
         super().__init__()
         self.scale_factor = scale_factor
         
-        # 1. 입력 처리
+        # 1. 초기 특징 추출 (저해상도에서 시작)
         self.entry = nn.Sequential(
             nn.Conv2d(1, base_channels, kernel_size=9, padding=4),
             nn.PReLU()
         )
         
-        # 2. 깊은 Residual Blocks (특징 추출)
-        self.res_blocks = nn.Sequential(
-            *[ResidualBlock(base_channels) for _ in range(num_residual_blocks)]
+        # 2. 저해상도에서의 깊은 Residual Blocks (256×144)
+        self.res_blocks_low = nn.Sequential(
+            *[ResidualBlock(base_channels) for _ in range(num_residual_blocks // 2)]
         )
         
-        # 3. 중간 압축
-        self.mid_conv = nn.Sequential(
-            nn.Conv2d(base_channels, base_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(base_channels)
+        # 3. 첫 번째 업샘플링: 256×144 → 512×288 (2×)
+        self.upsample1 = UpsampleBlock(base_channels, base_channels)
+        self.res_blocks_mid1 = nn.Sequential(
+            *[ResidualBlock(base_channels) for _ in range(4)]
         )
         
-        # 4. 업샘플링 (256x144 -> 512x288 -> 1024x576 -> 1280x720)
-        # scale_factor=5 이므로 먼저 2배씩 업샘플링
-        self.upsample_blocks = nn.ModuleList([
-            UpsampleBlock(base_channels, base_channels),  # 2x
-            UpsampleBlock(base_channels, base_channels),  # 2x
-        ])
+        # 4. 두 번째 업샘플링: 512×288 → 1024×576 (2×)
+        self.upsample2 = UpsampleBlock(base_channels, base_channels)
+        self.res_blocks_mid2 = nn.Sequential(
+            *[ResidualBlock(base_channels) for _ in range(4)]
+        )
         
-        # 5. 최종 조정 (4배 업샘플링 후 1.25배 보간으로 5배 달성)
+        # 5. 최종 고해상도 특징 정제 및 출력
         self.final_conv = nn.Sequential(
             nn.Conv2d(base_channels, base_channels, kernel_size=3, padding=1),
             nn.PReLU(),
-            nn.Conv2d(base_channels, 1, kernel_size=9, padding=4)
+            nn.Conv2d(base_channels, base_channels, kernel_size=3, padding=1),
+            nn.PReLU(),
+            nn.Conv2d(base_channels, 1, kernel_size=9, padding=4),
+            nn.Tanh()  # 고주파 residual: [-1, 1]
         )
-        
-        # 6. 저주파 필터 (원본 보존 확인용)
-        self.lowpass_filter = LowPassFilter(kernel_size=21, sigma=5.0)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -229,32 +231,42 @@ class Generator(nn.Module):
         """
         batch_size = x.size(0)
         
-        # 저주파 원본을 bilinear로 업스케일 (저주파 보존 base)
-        x_upscaled = F.interpolate(
-            x, 
-            size=(720, 1280),  # 직접 5배 업스케일
-            mode='bilinear', 
-            align_corners=False
-        )
+        # ============================================
+        # 단계 1: 저해상도(256×144)에서 특징 추출
+        # ============================================
+        feat = self.entry(x)  # [B, 64, 144, 256]
+        feat = self.res_blocks_low(feat)  # 깊은 특징 추출
         
-        # 저주파 성분 추출 (더 명확한 저주파 보존을 위해)
-        x_lowfreq_base = self.lowpass_filter(x_upscaled)
+        # ============================================
+        # 단계 2: 첫 번째 업샘플링 (2×) → 512×288
+        # ============================================
+        feat = self.upsample1(feat)  # [B, 64, 288, 512]
+        feat = self.res_blocks_mid1(feat)  # 중간 해상도 특징 정제
         
-        # 특징 추출 및 고주파 생성 경로
-        feat = self.entry(x_upscaled)
-        feat_res = self.res_blocks(feat)
-        feat_res = self.mid_conv(feat_res) + feat  # 전역 residual
+        # ============================================
+        # 단계 3: 두 번째 업샘플링 (2×) → 1024×576
+        # ============================================
+        feat = self.upsample2(feat)  # [B, 64, 576, 1024]
+        feat = self.res_blocks_mid2(feat)  # 고해상도 특징 정제
         
-        # 점진적 업샘플링 (이미 720x1280이므로 특징 정제에 사용)
-        # 실제로는 x_upscaled가 이미 목표 크기이므로 특징만 정제
-        highfreq_feat = feat_res
+        # ============================================
+        # 단계 4: 1024×576 → 1280×720 보간 및 고주파 생성
+        # ============================================
+        # 1.25배 보간으로 최종 크기 맞춤
+        feat = F.interpolate(feat, size=(720, 1280), mode='bilinear', align_corners=False)
         
-        # 고주파 성분 생성
-        highfreq_output = self.final_conv(highfreq_feat)
+        # 고주파 디테일 생성
+        highfreq_detail = self.final_conv(feat)  # [B, 1, 720, 1280], [-1, 1] 범위
         
-        # 핵심: 저주파 base + 생성된 고주파 = 최종 출력
-        # 이렇게 하면 저주파는 원본이 직접 보존됨
-        output = x_lowfreq_base + highfreq_output
+        # ============================================
+        # 단계 5: 저주파 base 생성 및 최종 합성
+        # ============================================
+        # 입력 저주파를 직접 업스케일 (저주파 보존)
+        lowfreq_base = F.interpolate(x, size=(720, 1280), mode='bilinear', align_corners=False)
+        
+        # 최종 출력 = 저주파 base + 고주파 detail
+        # 고주파 스케일을 0.5로 증가 (더 강한 디테일)
+        output = lowfreq_base + highfreq_detail * 0.5
         
         return output.clamp(0.0, 1.0)
 
@@ -536,7 +548,7 @@ def train(cfg: TrainConfig) -> None:
                     loss_d_real += criterion_gan(real_logits, torch.ones_like(real_logits))
                     loss_d_fake += criterion_gan(fake_logits, torch.zeros_like(fake_logits))
                 
-                loss_d = 0.5 * (loss_d_real + loss_d_fake) / len(real_logits_list)
+                loss_d = (loss_d_real + loss_d_fake) / len(real_logits_list)
             
             scaler_d.scale(loss_d).backward()
             scaler_d.step(optimizer_d)
@@ -563,19 +575,19 @@ def train(cfg: TrainConfig) -> None:
                 # 3. 저주파 보존 손실 (핵심!)
                 lowfreq_loss = compute_lowfreq_preservation_loss(preds, y, lowpass_filter)
                 
-                # 4. 에지 보존 손실 (애니메이션 윤곽선)
+                # 4. 에지 보존 손실 (애니메이션 윤곽선) - 가중치 증가
                 edge_loss = compute_edge_loss(preds, y, edge_detector)
                 
-                # 5. 그래디언트 손실 (샤프니스)
+                # 5. 그래디언트 손실 (샤프니스) - 가중치 증가
                 grad_loss = compute_gradient_loss(preds, y)
                 
                 # 총 Generator 손실
                 loss_g = (
-                    adv_loss * 1.0 +
+                    adv_loss * 0.5 +                # adversarial 약간 감소
                     pixel_loss * cfg.LAMBDA_L1 +
                     lowfreq_loss * cfg.LAMBDA_FREQ +
-                    edge_loss * 10.0 +
-                    grad_loss * 5.0
+                    edge_loss * 8.0 +              # 10→20 (에지 강조)
+                    grad_loss * 4.0                # 5→10 (샤프니스 강조)
                 )
             
             scaler_g.scale(loss_g).backward()

@@ -3,3 +3,4 @@ work_dir
 videos
 onnx_models
 tensorrt_engines
+models
