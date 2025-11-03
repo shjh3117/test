@@ -528,6 +528,10 @@ def train(cfg: TrainConfig) -> None:
         generator.train()
         discriminator.train()
         
+        # Train PSNR 계산을 위한 변수
+        train_total_psnr = 0.0
+        train_total_samples = 0
+        
         progress = tqdm(train_loader, desc=f'Epoch {epoch}/{cfg.EPOCHS}', ncols=120)
         
         for batch in progress:
@@ -593,29 +597,41 @@ def train(cfg: TrainConfig) -> None:
                     adv_loss * 0.5 +                # adversarial 약간 감소
                     pixel_loss * cfg.LAMBDA_L1 +
                     lowfreq_loss * cfg.LAMBDA_FREQ +
-                    edge_loss * 8.0 +              # 10→20 (에지 강조)
-                    grad_loss * 4.0                # 5→10 (샤프니스 강조)
-                )
-            
             scaler_g.scale(loss_g).backward()
             scaler_g.step(optimizer_g)
             scaler_g.update()
 
+            # Train PSNR 계산 (detach하여 그래디언트 계산 방지)
+            with torch.no_grad():
+                mse = F.mse_loss(preds.detach(), y, reduction='none').mean(dim=[1, 2, 3])
+                psnr = 10 * torch.log10(1.0 / (mse + 1e-8))
+                train_total_psnr += psnr.sum().item()
+                train_total_samples += y.size(0)
+
             global_step += 1
 
             if global_step % cfg.LOG_INTERVAL == 0:
-                progress.set_postfix({
-                    'G': f'{loss_g.item():.2f}',
-                    'D': f'{loss_d.item():.3f}',
-                    'L1': f'{pixel_loss.item():.4f}',
-                    'LF': f'{lowfreq_loss.item():.4f}',
-                    'E': f'{edge_loss.item():.4f}',
+
+            global_step += 1
+
                 })
+
+        # Train PSNR 계산
+        train_psnr = train_total_psnr / max(1, train_total_samples)
 
         # Validation
         val_metrics = validate(generator, val_loader, device, cfg, lowpass_filter, edge_detector)
 
         # Checkpoint 저장
+        if epoch % cfg.CHECKPOINT_INTERVAL == 0:
+            save_checkpoint(generator, discriminator, optimizer_g, optimizer_d, epoch, cfg, val_metrics)
+
+        print(f'\n[Epoch {epoch}]')
+        print(f'  Train PSNR: {train_psnr:.2f}dB')
+        print(f'  Val - L1: {val_metrics["l1"]:.6f} | '
+              f'LowFreq: {val_metrics["lowfreq"]:.6f} | '
+              f'Edge: {val_metrics["edge"]:.6f} | '
+              f'PSNR: {val_metrics["psnr"]:.2f}dB\n')
         if epoch % cfg.CHECKPOINT_INTERVAL == 0:
             save_checkpoint(generator, discriminator, optimizer_g, optimizer_d, epoch, cfg, val_metrics)
 
