@@ -266,36 +266,25 @@ def process_video_frequency_based(video_path, output_dir, video_name, device,
             del scene_y_full, scene_y_full_cpu
             
             # 4 & 5b. 저주파 이미지 생성 (올바른 방법)
-            # 중앙 외 영역을 0으로 마스킹하여 저주파만 남김
+            # 주파수 영역에서 중앙 crop_height x crop_width 영역만 추출
             center_y, center_x = height // 2, width // 2
-            mask_height = crop_height * 2  # 중앙에서 크롭할 영역의 2배
-            mask_width = crop_width * 2
-            start_y = center_y - mask_height // 2
-            end_y = start_y + mask_height
-            start_x = center_x - mask_width // 2
-            end_x = start_x + mask_width
+            start_y = center_y - crop_height // 2
+            end_y = start_y + crop_height
+            start_x = center_x - crop_width // 2
+            end_x = start_x + crop_width
             
-            # 저주파 마스크 생성
-            scene_fft_lowfreq = torch.zeros_like(scene_fft)
-            scene_fft_lowfreq[:, start_y:end_y, start_x:end_x] = scene_fft[:, start_y:end_y, start_x:end_x]
+            # 주파수 영역에서 직접 크롭 (shifted 상태에서)
+            scene_fft_cropped = scene_fft[:, start_y:end_y, start_x:end_x]  # [N, crop_height, crop_width]
             
-            # IFFT로 공간 영역으로 변환
-            scene_fft_lowfreq_ishifted = torch.fft.ifftshift(scene_fft_lowfreq, dim=(-2, -1))
-            scene_x_fullsize = torch.fft.ifft2(scene_fft_lowfreq_ishifted)
-            scene_x_fullsize = torch.real(scene_x_fullsize).clamp(0, 255)
-            
-            # 256x144로 다운샘플링 (보간)
-            scene_x_low = torch.nn.functional.interpolate(
-                scene_x_fullsize.unsqueeze(1),  # [N, 1, 720, 1280]
-                size=(crop_height, crop_width),
-                mode='bilinear',
-                align_corners=False
-            ).squeeze(1)  # [N, 144, 256]
+            # 크롭된 주파수 영역을 직접 IFFT (크기가 crop_height x crop_width로 유지됨)
+            scene_fft_cropped_ishifted = torch.fft.ifftshift(scene_fft_cropped, dim=(-2, -1))
+            scene_x_low = torch.fft.ifft2(scene_fft_cropped_ishifted)
+            scene_x_low = torch.real(scene_x_low).clamp(0, 255)  # [N, crop_height, crop_width]
             
             # CPU로 이동하여 저장
             scene_x_low_cpu = scene_x_low.cpu()
             save_frames_as_png(scene_x_low_cpu, output_scene_dir, 'x')
-            del scene_x_fullsize, scene_x_low, scene_x_low_cpu, scene_fft_lowfreq, scene_fft_lowfreq_ishifted
+            del scene_x_low, scene_x_low_cpu, scene_fft_cropped, scene_fft_cropped_ishifted
             
             scene_idx += 1
             gc.collect()

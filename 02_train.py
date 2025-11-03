@@ -146,20 +146,67 @@ class Generator(nn.Module):
         self.high_pass = HighPassFilter()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        base = F.interpolate(
+        # 입력 저주파를 업스케일 (bilinear로 저주파 보존)
+        lowfreq_upscaled = F.interpolate(
             x,
             scale_factor=self.scale_factor,
             mode='bilinear',
             align_corners=False,
         )
 
-        feat = self.entry(base)
+        # 네트워크로 중~고주파 생성
+        feat = self.entry(lowfreq_upscaled)
         residual = self.res_blocks(feat)
         residual = self.mid_conv(residual) + feat
         residual = self.exit(residual)
+        
+        # 고주파 필터로 저주파 제거 (중~고주파만 남김)
         high_freq = self.high_pass(residual)
-        out = base + high_freq
+        
+        # 입력 저주파 + 생성된 고주파 = 최종 출력
+        out = lowfreq_upscaled + high_freq
         return out.clamp(0.0, 1.0)
+
+
+def compute_frequency_loss(pred: torch.Tensor, target: torch.Tensor, lowfreq_ratio: float = 0.2) -> torch.Tensor:
+    """
+    주파수 도메인에서 저주파 영역의 L1 손실 계산
+    
+    Args:
+        pred: 예측 이미지 [B, 1, H, W]
+        target: 타겟 이미지 [B, 1, H, W]
+        lowfreq_ratio: 중앙에서 저주파로 취급할 영역 비율 (0~1)
+    
+    Returns:
+        저주파 영역의 L1 손실
+    """
+    # FFT 수행
+    pred_fft = torch.fft.fft2(pred.squeeze(1))  # [B, H, W]
+    target_fft = torch.fft.fft2(target.squeeze(1))  # [B, H, W]
+    
+    # Shift하여 중앙에 저주파 배치
+    pred_fft_shifted = torch.fft.fftshift(pred_fft, dim=(-2, -1))
+    target_fft_shifted = torch.fft.fftshift(target_fft, dim=(-2, -1))
+    
+    # 저주파 영역 마스크 생성
+    b, h, w = pred_fft_shifted.shape
+    center_h, center_w = h // 2, w // 2
+    mask_h = int(h * lowfreq_ratio)
+    mask_w = int(w * lowfreq_ratio)
+    
+    # 중앙 저주파 영역만 추출
+    start_h = center_h - mask_h // 2
+    end_h = start_h + mask_h
+    start_w = center_w - mask_w // 2
+    end_w = start_w + mask_w
+    
+    pred_lowfreq = pred_fft_shifted[:, start_h:end_h, start_w:end_w]
+    target_lowfreq = target_fft_shifted[:, start_h:end_h, start_w:end_w]
+    
+    # 복소수의 magnitude에 대한 L1 손실
+    loss = F.l1_loss(torch.abs(pred_lowfreq), torch.abs(target_lowfreq))
+    
+    return loss
 
 
 class Discriminator(nn.Module):
@@ -228,7 +275,7 @@ def prepare_dataloaders(cfg: TrainConfig):
     return train_loader, val_loader
 
 
-def save_checkpoint(generator, discriminator, optim_g, optim_d, epoch, cfg: TrainConfig, val_l1: float) -> None:
+def save_checkpoint(generator, discriminator, optim_g, optim_d, epoch, cfg: TrainConfig, val_metrics: dict) -> None:
     os.makedirs(cfg.MODEL_DIR, exist_ok=True)
     checkpoint = {
         'epoch': epoch,
@@ -236,15 +283,18 @@ def save_checkpoint(generator, discriminator, optim_g, optim_d, epoch, cfg: Trai
         'discriminator': discriminator.state_dict(),
         'optimizer_g': optim_g.state_dict(),
         'optimizer_d': optim_d.state_dict(),
-        'val_l1': val_l1,
+        'val_metrics': val_metrics,
     }
     torch.save(checkpoint, os.path.join(cfg.MODEL_DIR, f'epoch_{epoch:04d}_checkpoint.pt'))
     torch.save(generator.state_dict(), os.path.join(cfg.MODEL_DIR, 'latest_generator.pt'))
 
 
-def validate(generator, data_loader, device, cfg: TrainConfig) -> float:
+def validate(generator, data_loader, device, cfg: TrainConfig) -> dict:
+    """검증 수행 및 다양한 메트릭 계산"""
     generator.eval()
     total_l1 = 0.0
+    total_freq_l1 = 0.0
+    total_psnr = 0.0
     total_samples = 0
 
     with torch.no_grad():
@@ -253,13 +303,31 @@ def validate(generator, data_loader, device, cfg: TrainConfig) -> float:
             y = batch['y'].to(device, non_blocking=True)
 
             preds = generator(x)
+            
+            # 공간 도메인 L1 손실
             l1 = F.l1_loss(preds, y, reduction='sum')
-
             total_l1 += l1.item()
-            total_samples += y.size(0) * y.size(2) * y.size(3)
+            
+            # 주파수 도메인 저주파 L1 손실
+            freq_l1 = compute_frequency_loss(preds, y, lowfreq_ratio=0.2)
+            total_freq_l1 += freq_l1.item() * y.size(0)
+            
+            # PSNR 계산
+            mse = F.mse_loss(preds, y, reduction='none').mean(dim=[1, 2, 3])
+            psnr = 10 * torch.log10(1.0 / (mse + 1e-8))
+            total_psnr += psnr.sum().item()
+            
+            total_samples += y.size(0)
 
     generator.train()
-    return total_l1 / max(1, total_samples)
+    
+    num_pixels = total_samples * data_loader.dataset[0]['y'].size(1) * data_loader.dataset[0]['y'].size(2)
+    
+    return {
+        'l1': total_l1 / max(1, num_pixels),
+        'freq_l1': total_freq_l1 / max(1, total_samples),
+        'psnr': total_psnr / max(1, total_samples),
+    }
 
 
 def train(cfg: TrainConfig) -> None:
@@ -308,7 +376,8 @@ def train(cfg: TrainConfig) -> None:
                 pred_logits = discriminator(preds)
                 adv_loss = criterion_gan(pred_logits, torch.ones_like(pred_logits))
                 l1_loss = F.l1_loss(preds, y) * cfg.LAMBDA_L1
-                loss_g = adv_loss + l1_loss
+                freq_loss = compute_frequency_loss(preds, y, lowfreq_ratio=0.2) * cfg.LAMBDA_FREQ
+                loss_g = adv_loss + l1_loss + freq_loss
             scaler_g.scale(loss_g).backward()
             scaler_g.step(optimizer_g)
             scaler_g.update()
@@ -320,14 +389,16 @@ def train(cfg: TrainConfig) -> None:
                     'loss_g': f'{loss_g.item():.3f}',
                     'loss_d': f'{loss_d.item():.3f}',
                     'l1': f'{l1_loss.item():.3f}',
+                    'freq': f'{freq_loss.item():.3f}',
                 })
 
-        val_l1 = validate(generator, val_loader, device, cfg)
+        val_metrics = validate(generator, val_loader, device, cfg)
 
         if epoch % cfg.CHECKPOINT_INTERVAL == 0:
-            save_checkpoint(generator, discriminator, optimizer_g, optimizer_d, epoch, cfg, val_l1)
+            save_checkpoint(generator, discriminator, optimizer_g, optimizer_d, epoch, cfg, val_metrics)
 
-        print(f'Epoch {epoch}: val L1 = {val_l1:.6f}')
+        print(f'Epoch {epoch}: val L1 = {val_metrics["l1"]:.6f}, '
+              f'freq L1 = {val_metrics["freq_l1"]:.6f}, PSNR = {val_metrics["psnr"]:.2f}dB')
 
 
 if __name__ == '__main__':

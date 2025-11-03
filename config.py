@@ -53,6 +53,7 @@ class TrainConfig:
     BETA1 = 0.5                     # Adam beta1
     BETA2 = 0.999                   # Adam beta2
     LAMBDA_L1 = 100.0               # L1 재구성 손실 가중치
+    LAMBDA_FREQ = 10.0              # 주파수 도메인 저주파 손실 가중치
     LAMBDA_VGG = 0.0                # VGG perceptual loss 가중치 (미사용시 0)
     SCALE_FACTOR = 5                # 업스케일 비율 (1280/256)
     DEVICE = _DEVICE                # 학습 디바이스

@@ -70,18 +70,25 @@ class Generator(nn.Module):
         self.high_pass = HighPassFilter()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        base = F.interpolate(
+        # 입력 저주파를 업스케일 (bilinear로 저주파 보존)
+        lowfreq_upscaled = F.interpolate(
             x,
             scale_factor=self.scale_factor,
             mode='bilinear',
             align_corners=False,
         )
-        feat = self.entry(base)
+
+        # 네트워크로 중~고주파 생성
+        feat = self.entry(lowfreq_upscaled)
         residual = self.res_blocks(feat)
         residual = self.mid_conv(residual) + feat
         residual = self.exit(residual)
+        
+        # 고주파 필터로 저주파 제거 (중~고주파만 남김)
         high_freq = self.high_pass(residual)
-        out = base + high_freq
+        
+        # 입력 저주파 + 생성된 고주파 = 최종 출력
+        out = lowfreq_upscaled + high_freq
         return out.clamp(0.0, 1.0)
 
 
