@@ -542,43 +542,49 @@ def train(cfg: TrainConfig) -> None:
             x_upscaled = F.interpolate(x, size=(720, 1280), mode='bilinear', align_corners=False)
 
             # ===========================
-            # Discriminator 업데이트
+            # Discriminator 업데이트 (3 epoch부터 시작)
             # ===========================
-            optimizer_d.zero_grad(set_to_none=True)
-            
-            with autocast_ctx(use_amp):
-                fake_images = generator(x).detach()
+            if epoch >= 3:
+                optimizer_d.zero_grad(set_to_none=True)
                 
-                # 멀티스케일 판별
-                real_logits_list = discriminator(x_upscaled, y)
-                fake_logits_list = discriminator(x_upscaled, fake_images)
+                with autocast_ctx(use_amp):
+                    fake_images = generator(x).detach()
+                    
+                    # 멀티스케일 판별
+                    real_logits_list = discriminator(x_upscaled, y)
+                    fake_logits_list = discriminator(x_upscaled, fake_images)
+                    
+                    loss_d_real = 0
+                    loss_d_fake = 0
+                    for real_logits, fake_logits in zip(real_logits_list, fake_logits_list):
+                        loss_d_real += criterion_gan(real_logits, torch.ones_like(real_logits))
+                        loss_d_fake += criterion_gan(fake_logits, torch.zeros_like(fake_logits))
+                    
+                    loss_d = (loss_d_real + loss_d_fake) / len(real_logits_list)
                 
-                loss_d_real = 0
-                loss_d_fake = 0
-                for real_logits, fake_logits in zip(real_logits_list, fake_logits_list):
-                    loss_d_real += criterion_gan(real_logits, torch.ones_like(real_logits))
-                    loss_d_fake += criterion_gan(fake_logits, torch.zeros_like(fake_logits))
-                
-                loss_d = (loss_d_real + loss_d_fake) / len(real_logits_list)
-            
-            scaler_d.scale(loss_d).backward()
-            scaler_d.step(optimizer_d)
-            scaler_d.update()
+                scaler_d.scale(loss_d).backward()
+                scaler_d.step(optimizer_d)
+                scaler_d.update()
+            else:
+                loss_d = torch.tensor(0.0)
 
             # ===========================
             # Generator 업데이트
-            # ===========================
-            optimizer_g.zero_grad(set_to_none=True)
-            
             with autocast_ctx(use_amp):
                 preds = generator(x)
                 
-                # 1. Adversarial Loss (멀티스케일)
-                pred_logits_list = discriminator(x_upscaled, preds)
-                adv_loss = 0
-                for pred_logits in pred_logits_list:
-                    adv_loss += criterion_gan(pred_logits, torch.ones_like(pred_logits))
-                adv_loss = adv_loss / len(pred_logits_list)
+                # 1. Adversarial Loss (멀티스케일) - 3 epoch부터만 적용
+                if epoch >= 3:
+                    pred_logits_list = discriminator(x_upscaled, preds)
+                    adv_loss = 0
+                    for pred_logits in pred_logits_list:
+                        adv_loss += criterion_gan(pred_logits, torch.ones_like(pred_logits))
+                    adv_loss = adv_loss / len(pred_logits_list)
+                else:
+                    adv_loss = torch.tensor(0.0, device=device)
+                
+                # 2. Pixel Loss (L1)
+                pixel_loss = F.l1_loss(preds, y)ogits_list)
                 
                 # 2. Pixel Loss (L1)
                 pixel_loss = F.l1_loss(preds, y)
@@ -611,14 +617,14 @@ def train(cfg: TrainConfig) -> None:
                 psnr = 10 * torch.log10(1.0 / (mse + 1e-8))
                 train_total_psnr += psnr.sum().item()
                 train_total_samples += y.size(0)
-
-            global_step += 1
-
             if global_step % cfg.LOG_INTERVAL == 0:
                 progress.set_postfix({
                     'G': f'{loss_g.item():.2f}',
-                    'D': f'{loss_d.item():.3f}',
+                    'D': f'{loss_d.item() if isinstance(loss_d, torch.Tensor) else 0:.3f}',
                     'L1': f'{pixel_loss.item():.4f}',
+                    'LF': f'{lowfreq_loss.item():.4f}',
+                    'E': f'{edge_loss.item():.4f}',
+                })  'L1': f'{pixel_loss.item():.4f}',
                     'LF': f'{lowfreq_loss.item():.4f}',
                     'E': f'{edge_loss.item():.4f}',
                 })
