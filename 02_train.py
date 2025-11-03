@@ -106,6 +106,52 @@ class ResidualBlock(nn.Module):
         return x + residual
 
 
+class LowPassFilter(nn.Module):
+    """저주파 통과 필터 (Gaussian blur 기반)"""
+    
+    def __init__(self, kernel_size: int = 15, sigma: float = 3.0) -> None:
+        super().__init__()
+        # Gaussian 커널 생성
+        ax = torch.arange(-kernel_size // 2 + 1., kernel_size // 2 + 1.)
+        xx, yy = torch.meshgrid(ax, ax, indexing='ij')
+        kernel = torch.exp(-(xx**2 + yy**2) / (2. * sigma**2))
+        kernel = kernel / kernel.sum()
+        
+        self.register_buffer('kernel', kernel.view(1, 1, kernel_size, kernel_size))
+        self.padding = kernel_size // 2
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x: [B, 1, H, W]
+        Returns:
+            저주파 성분만 추출된 이미지 [B, 1, H, W]
+        """
+        return F.conv2d(x, self.kernel, padding=self.padding)
+
+
+def compute_lowfreq_loss(pred: torch.Tensor, target: torch.Tensor, lowpass_filter: LowPassFilter) -> torch.Tensor:
+    """
+    저주파 통과 필터를 사용한 저주파 보존 손실 계산
+    
+    Args:
+        pred: 예측 이미지 [B, 1, H, W]
+        target: 타겟 이미지 [B, 1, H, W]
+        lowpass_filter: 저주파 통과 필터
+    
+    Returns:
+        저주파 영역의 L1 손실
+    """
+    # 저주파 성분만 추출
+    pred_lowfreq = lowpass_filter(pred)
+    target_lowfreq = lowpass_filter(target)
+    
+    # L1 손실 계산
+    loss = F.l1_loss(pred_lowfreq, target_lowfreq)
+    
+    return loss
+
+
 class HighPassFilter(nn.Module):
     """고역 통과 필터로 저주파 성분을 보호."""
 
@@ -166,57 +212,6 @@ class Generator(nn.Module):
         # 입력 저주파 + 생성된 고주파 = 최종 출력
         out = lowfreq_upscaled + high_freq
         return out.clamp(0.0, 1.0)
-
-
-def compute_frequency_loss(pred: torch.Tensor, target: torch.Tensor, lowfreq_ratio: float = 0.2) -> torch.Tensor:
-    """
-    주파수 도메인에서 저주파 영역의 L1 손실 계산
-    
-    Args:
-        pred: 예측 이미지 [B, 1, H, W]
-        target: 타겟 이미지 [B, 1, H, W]
-        lowfreq_ratio: 중앙에서 저주파로 취급할 영역 비율 (0~1)
-    
-    Returns:
-        저주파 영역의 L1 손실 (정규화됨)
-    """
-    # FFT 수행
-    pred_fft = torch.fft.fft2(pred.squeeze(1))  # [B, H, W]
-    target_fft = torch.fft.fft2(target.squeeze(1))  # [B, H, W]
-    
-    # Shift하여 중앙에 저주파 배치
-    pred_fft_shifted = torch.fft.fftshift(pred_fft, dim=(-2, -1))
-    target_fft_shifted = torch.fft.fftshift(target_fft, dim=(-2, -1))
-    
-    # 저주파 영역 마스크 생성
-    b, h, w = pred_fft_shifted.shape
-    center_h, center_w = h // 2, w // 2
-    mask_h = int(h * lowfreq_ratio)
-    mask_w = int(w * lowfreq_ratio)
-    
-    # 중앙 저주파 영역만 추출
-    start_h = center_h - mask_h // 2
-    end_h = start_h + mask_h
-    start_w = center_w - mask_w // 2
-    end_w = start_w + mask_w
-    
-    pred_lowfreq = pred_fft_shifted[:, start_h:end_h, start_w:end_w]
-    target_lowfreq = target_fft_shifted[:, start_h:end_h, start_w:end_w]
-    
-    # 복소수의 magnitude 계산
-    pred_mag = torch.abs(pred_lowfreq)
-    target_mag = torch.abs(target_lowfreq)
-    
-    # 이미지 크기로 정규화 (FFT magnitude는 픽셀 수에 비례)
-    # 0~1 범위로 스케일링하여 공간 도메인 L1과 비슷한 스케일 유지
-    normalization = h * w
-    pred_mag_norm = pred_mag / normalization
-    target_mag_norm = target_mag / normalization
-    
-    # L1 손실 계산
-    loss = F.l1_loss(pred_mag_norm, target_mag_norm)
-    
-    return loss
 
 
 class Discriminator(nn.Module):
@@ -299,11 +294,11 @@ def save_checkpoint(generator, discriminator, optim_g, optim_d, epoch, cfg: Trai
     torch.save(generator.state_dict(), os.path.join(cfg.MODEL_DIR, 'latest_generator.pt'))
 
 
-def validate(generator, data_loader, device, cfg: TrainConfig) -> dict:
+def validate(generator, data_loader, device, cfg: TrainConfig, lowpass_filter: LowPassFilter) -> dict:
     """검증 수행 및 다양한 메트릭 계산"""
     generator.eval()
     total_l1 = 0.0
-    total_freq_l1 = 0.0
+    total_lowfreq_l1 = 0.0
     total_psnr = 0.0
     total_samples = 0
 
@@ -318,9 +313,9 @@ def validate(generator, data_loader, device, cfg: TrainConfig) -> dict:
             l1 = F.l1_loss(preds, y, reduction='sum')
             total_l1 += l1.item()
             
-            # 주파수 도메인 저주파 L1 손실
-            freq_l1 = compute_frequency_loss(preds, y, lowfreq_ratio=0.2)
-            total_freq_l1 += freq_l1.item() * y.size(0)
+            # 저주파 L1 손실 (LowPass Filter 사용)
+            lowfreq_l1 = compute_lowfreq_loss(preds, y, lowpass_filter)
+            total_lowfreq_l1 += lowfreq_l1.item() * y.size(0)
             
             # PSNR 계산
             mse = F.mse_loss(preds, y, reduction='none').mean(dim=[1, 2, 3])
@@ -335,7 +330,7 @@ def validate(generator, data_loader, device, cfg: TrainConfig) -> dict:
     
     return {
         'l1': total_l1 / max(1, num_pixels),
-        'freq_l1': total_freq_l1 / max(1, total_samples),
+        'lowfreq_l1': total_lowfreq_l1 / max(1, total_samples),
         'psnr': total_psnr / max(1, total_samples),
     }
 
@@ -349,6 +344,9 @@ def train(cfg: TrainConfig) -> None:
 
     generator = Generator(cfg.BASE_CHANNELS, cfg.NUM_RESIDUAL_BLOCKS, cfg.SCALE_FACTOR).to(device)
     discriminator = Discriminator(cfg.BASE_CHANNELS).to(device)
+    
+    # 저주파 통과 필터 생성 (Gaussian blur 기반)
+    lowpass_filter = LowPassFilter(kernel_size=15, sigma=3.0).to(device)
 
     criterion_gan = nn.BCEWithLogitsLoss()
     optimizer_g = torch.optim.Adam(generator.parameters(), lr=cfg.LR_GENERATOR, betas=(cfg.BETA1, cfg.BETA2))
@@ -386,8 +384,8 @@ def train(cfg: TrainConfig) -> None:
                 pred_logits = discriminator(preds)
                 adv_loss = criterion_gan(pred_logits, torch.ones_like(pred_logits))
                 l1_loss = F.l1_loss(preds, y) * cfg.LAMBDA_L1
-                freq_loss = compute_frequency_loss(preds, y, lowfreq_ratio=0.2) * cfg.LAMBDA_FREQ
-                loss_g = adv_loss + l1_loss + freq_loss
+                lowfreq_loss = compute_lowfreq_loss(preds, y, lowpass_filter) * cfg.LAMBDA_FREQ
+                loss_g = adv_loss + l1_loss + lowfreq_loss
             scaler_g.scale(loss_g).backward()
             scaler_g.step(optimizer_g)
             scaler_g.update()
@@ -399,16 +397,16 @@ def train(cfg: TrainConfig) -> None:
                     'loss_g': f'{loss_g.item():.3f}',
                     'loss_d': f'{loss_d.item():.3f}',
                     'l1': f'{l1_loss.item():.3f}',
-                    'freq': f'{freq_loss.item():.3f}',
+                    'lowf': f'{lowfreq_loss.item():.3f}',
                 })
 
-        val_metrics = validate(generator, val_loader, device, cfg)
+        val_metrics = validate(generator, val_loader, device, cfg, lowpass_filter)
 
         if epoch % cfg.CHECKPOINT_INTERVAL == 0:
             save_checkpoint(generator, discriminator, optimizer_g, optimizer_d, epoch, cfg, val_metrics)
 
         print(f'Epoch {epoch}: val L1 = {val_metrics["l1"]:.6f}, '
-              f'freq L1 = {val_metrics["freq_l1"]:.6f}, PSNR = {val_metrics["psnr"]:.2f}dB')
+              f'lowfreq L1 = {val_metrics["lowfreq_l1"]:.6f}, PSNR = {val_metrics["psnr"]:.2f}dB')
 
 
 if __name__ == '__main__':
