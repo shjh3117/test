@@ -25,7 +25,7 @@ class YUV420ExtractorConfig:
     MIN_SCENE_FRAMES = 8            # 최소 scene 프레임 수 (8프레임 동안 새 scene 없으면 그대로 scene)
     
     # 처리 설정
-    BATCH_SIZE = 480               # 한 번에 처리할 프레임 수 (GPU 메모리)
+    BATCH_SIZE = 240               # 한 번에 처리할 프레임 수 (GPU 메모리)
     CROP_WIDTH = 256                # 저주파 대역 크롭 너비
     CROP_HEIGHT = 144               # 저주파 대역 크롭 높이
     
