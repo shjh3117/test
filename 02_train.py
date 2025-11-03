@@ -178,7 +178,7 @@ def compute_frequency_loss(pred: torch.Tensor, target: torch.Tensor, lowfreq_rat
         lowfreq_ratio: 중앙에서 저주파로 취급할 영역 비율 (0~1)
     
     Returns:
-        저주파 영역의 L1 손실
+        저주파 영역의 L1 손실 (정규화됨)
     """
     # FFT 수행
     pred_fft = torch.fft.fft2(pred.squeeze(1))  # [B, H, W]
@@ -203,8 +203,18 @@ def compute_frequency_loss(pred: torch.Tensor, target: torch.Tensor, lowfreq_rat
     pred_lowfreq = pred_fft_shifted[:, start_h:end_h, start_w:end_w]
     target_lowfreq = target_fft_shifted[:, start_h:end_h, start_w:end_w]
     
-    # 복소수의 magnitude에 대한 L1 손실
-    loss = F.l1_loss(torch.abs(pred_lowfreq), torch.abs(target_lowfreq))
+    # 복소수의 magnitude 계산
+    pred_mag = torch.abs(pred_lowfreq)
+    target_mag = torch.abs(target_lowfreq)
+    
+    # 이미지 크기로 정규화 (FFT magnitude는 픽셀 수에 비례)
+    # 0~1 범위로 스케일링하여 공간 도메인 L1과 비슷한 스케일 유지
+    normalization = h * w
+    pred_mag_norm = pred_mag / normalization
+    target_mag_norm = target_mag / normalization
+    
+    # L1 손실 계산
+    loss = F.l1_loss(pred_mag_norm, target_mag_norm)
     
     return loss
 
