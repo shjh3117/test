@@ -584,9 +584,6 @@ def train(cfg: TrainConfig) -> None:
                     adv_loss = torch.tensor(0.0, device=device)
                 
                 # 2. Pixel Loss (L1)
-                pixel_loss = F.l1_loss(preds, y)ogits_list)
-                
-                # 2. Pixel Loss (L1)
                 pixel_loss = F.l1_loss(preds, y)
                 
                 # 3. 저주파 보존 손실 (핵심!)
@@ -614,17 +611,20 @@ def train(cfg: TrainConfig) -> None:
             # Train PSNR 계산 (detach하여 그래디언트 계산 방지)
             with torch.no_grad():
                 mse = F.mse_loss(preds.detach(), y, reduction='none').mean(dim=[1, 2, 3])
+            # Train PSNR 계산 (detach하여 그래디언트 계산 방지)
+            with torch.no_grad():
+                mse = F.mse_loss(preds.detach(), y, reduction='none').mean(dim=[1, 2, 3])
                 psnr = 10 * torch.log10(1.0 / (mse + 1e-8))
                 train_total_psnr += psnr.sum().item()
                 train_total_samples += y.size(0)
+
+            global_step += 1
+
             if global_step % cfg.LOG_INTERVAL == 0:
                 progress.set_postfix({
                     'G': f'{loss_g.item():.2f}',
                     'D': f'{loss_d.item() if isinstance(loss_d, torch.Tensor) else 0:.3f}',
                     'L1': f'{pixel_loss.item():.4f}',
-                    'LF': f'{lowfreq_loss.item():.4f}',
-                    'E': f'{edge_loss.item():.4f}',
-                })  'L1': f'{pixel_loss.item():.4f}',
                     'LF': f'{lowfreq_loss.item():.4f}',
                     'E': f'{edge_loss.item():.4f}',
                 })
