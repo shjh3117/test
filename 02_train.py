@@ -434,13 +434,19 @@ def validate(generator, data_loader, device, cfg: TrainConfig,
     total_psnr = 0.0
     total_samples = 0
 
+    # FP16 사용 여부 확인
+    use_amp = device.type == 'cuda' and hasattr(cfg, 'USE_FP16') and cfg.USE_FP16
+
     with torch.no_grad():
         for batch in data_loader:
             x = batch['x'].to(device, non_blocking=True)
             y = batch['y'].to(device, non_blocking=True)
 
-            preds = generator(x)
+            # FP16으로 추론
+            with autocast_ctx(use_amp):
+                preds = generator(x)
             
+            # 손실 계산은 FP32로 (정확도를 위해)
             # L1 손실
             l1 = F.l1_loss(preds, y, reduction='sum')
             total_l1 += l1.item()
@@ -502,8 +508,8 @@ def train(cfg: TrainConfig) -> None:
     optimizer_g = torch.optim.Adam(generator.parameters(), lr=cfg.LR_GENERATOR, betas=(cfg.BETA1, cfg.BETA2))
     optimizer_d = torch.optim.Adam(discriminator.parameters(), lr=cfg.LR_DISCRIMINATOR, betas=(cfg.BETA1, cfg.BETA2))
 
-    # AMP 설정
-    use_amp = device.type == 'cuda'
+    # FP16 Mixed Precision Training 설정
+    use_amp = device.type == 'cuda' and hasattr(cfg, 'USE_FP16') and cfg.USE_FP16
     scaler_g = create_grad_scaler(use_amp)
     scaler_d = create_grad_scaler(use_amp)
     
@@ -513,6 +519,7 @@ def train(cfg: TrainConfig) -> None:
     global_step = 0
     
     print(f"Device: {device}")
+    print(f"FP16 Mixed Precision: {'Enabled' if use_amp else 'Disabled'}")
     print(f"Generator params: {sum(p.numel() for p in generator.parameters()):,}")
     print(f"Discriminator params: {sum(p.numel() for p in discriminator.parameters()):,}")
     print("="*60)

@@ -56,6 +56,7 @@ class TrainConfig:
     LAMBDA_FREQ = 4                  # 저주파 보존 손실 가중치
     LAMBDA_VGG = 0.0                # VGG perceptual loss 가중치 (미사용시 0)
     SCALE_FACTOR = 5                # 업스케일 비율 (1280/256)
+    USE_FP16 = True                 # FP16 Mixed Precision Training 사용 (GPU 필수)
     DEVICE = _DEVICE                # 학습 디바이스
 
 
